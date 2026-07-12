@@ -8,6 +8,7 @@ temp_processing/
 completed_reports/
 officer_profiles/
 .streamlit/
+logs/
 stderr.txt
 stdout.txt
 *.bat
