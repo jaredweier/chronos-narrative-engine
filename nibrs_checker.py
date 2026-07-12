@@ -3,6 +3,26 @@ import re
 import requests
 from typing import List, Dict, Any
 from config import OLLAMA_API_ENDPOINT, OLLAMA_MODEL, LLM_COMPLIANCE_OPTIONS, LLM_COMPLIANCE_TIMEOUT
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _extract_json(text: str) -> str:
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"```", "", text)
+    for open_char, close_char in [("[", "]"), ("{", "}")]:
+        start = text.find(open_char)
+        if start >= 0:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == open_char:
+                    depth += 1
+                elif text[i] == close_char:
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+    return ""
 
 
 NIBRS_REQUIREMENTS = {
@@ -83,25 +103,23 @@ COMPLIANCE CHECK:"""
         result = response.json()
         response_text = result.get("response", "")
         
-        response_text = re.sub(r"```(?:json)?\s*", "", response_text)
-        response_text = re.sub(r"```", "", response_text)
-        
-        json_start = response_text.find('[')
-        json_end = response_text.rfind(']') + 1
-        
-        if json_start >= 0 and json_end > json_start:
-            json_str = response_text[json_start:json_end]
+        json_str = _extract_json(response_text)
+        if json_str and json_str[0] == '[':
             return json.loads(json_str)
         
         return []
         
-    except Exception as e:
+    except requests.RequestException as e:
+        logger.error("NIBRS check network error: %s", e)
         return [{
             "element": "system_error",
             "severity": "warning",
             "message": f"NIBRS check could not be completed: {str(e)}",
             "suggestion": "Verify Ollama is running and Llama 3.1:8b is available"
         }]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        logger.error("NIBRS check parse error: %s", e)
+        return []
 
 
 def get_compliance_summary(warnings: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -212,14 +230,15 @@ Return ONLY the JSON array, nothing else."""
         )
         response.raise_for_status()
         text = response.json().get("response", "")
-        text = re.sub(r"```(?:json)?\s*", "", text)
-        text = re.sub(r"```", "", text)
-        start = text.find('[')
-        end = text.rfind(']') + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-    except Exception:
-        pass
+        json_str = _extract_json(text)
+        if json_str and json_str[0] == '[':
+            return json.loads(json_str)
+    except requests.RequestException as e:
+        logger.error("Missing fields net error: %s", e)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.debug("Missing fields parse error: %s", e)
+    except Exception as e:
+        logger.error("suggest_missing_fields: %s", e)
 
     return [{"element": m, "suggestion": f"Document the {m.replace('_', ' ')} in your narrative."} for m in missing]
 
@@ -257,14 +276,15 @@ Return ONLY the JSON object, nothing else."""
         )
         response.raise_for_status()
         text = response.json().get("response", "")
-        text = re.sub(r"```(?:json)?\s*", "", text)
-        text = re.sub(r"```", "", text)
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-    except Exception:
-        pass
+        json_str = _extract_json(text)
+        if json_str and json_str[0] == '{':
+            return json.loads(json_str)
+    except requests.RequestException as e:
+        logger.error("Probable cause net error: %s", e)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.debug("Probable cause parse error: %s", e)
+    except Exception as e:
+        logger.error("check_probable_cause: %s", e)
 
     return {
         "has_probable_cause": None,

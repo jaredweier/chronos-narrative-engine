@@ -2,11 +2,21 @@ import json
 import requests
 from typing import Dict, Any, Optional
 from pathlib import Path
-from pydantic import BaseModel, Field
+
+try:
+    from pydantic.v1 import BaseModel, Field
+except ImportError:
+    from pydantic import BaseModel, Field
+
 import pdfplumber
 
 from redactor import sanitize_pii_content
 from config import OLLAMA_API_ENDPOINT, OLLAMA_MODEL, LLM_COMPLIANCE_OPTIONS, LLM_COMPLIANCE_TIMEOUT
+from logger import get_logger
+
+logger = get_logger(__name__)
+
+from nibrs_checker import _extract_json
 
 
 class InvolvedParty(BaseModel):
@@ -73,17 +83,18 @@ JSON:"""
         result = response.json()
         response_text = result.get("response", "")
         
-        json_start = response_text.find('{')
-        json_end = response_text.rfind('}') + 1
-        
-        if json_start >= 0 and json_end > json_start:
-            json_str = response_text[json_start:json_end]
+        json_str = _extract_json(response_text)
+        if json_str and json_str[0] == '{':
             return json.loads(json_str)
         
+        logger.warning("No valid JSON found in Ollama response for CAD parsing")
         return None
         
-    except Exception as e:
-        print(f"Ollama query failed: {e}")
+    except requests.RequestException as e:
+        logger.error("Ollama CAD query network error: %s", e)
+        return None
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error("Ollama CAD query parse error: %s", e)
         return None
 
 
@@ -147,7 +158,8 @@ if __name__ == '__main__':
         pdf_path = sys.argv[1]
         if Path(pdf_path).exists():
             result = parse_zuercher_pdf(pdf_path)
-            print(json.dumps(result.model_dump(), indent=2))
+            dump = getattr(result, "model_dump", getattr(result, "dict", lambda: result.__dict__))()
+            print(json.dumps(dump, indent=2, default=str))
         else:
             print(f"File not found: {pdf_path}")
     else:

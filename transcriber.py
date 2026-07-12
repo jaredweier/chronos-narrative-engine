@@ -1,10 +1,14 @@
 import os
+import gc
 import threading
 import torch
 from faster_whisper import WhisperModel
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from config import WHISPER_MODEL_SIZE, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE, WHISPER_CPU_THREADS, WHISPER_VAD_MIN_SILENCE_MS, WHISPER_VAD_SPEECH_PAD_MS
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -33,16 +37,20 @@ class BodyCamTranscriber:
         if self.model is None:
             with self._model_lock:
                 if self.model is None:
-                    self.model = WhisperModel(
-                        self.model_size,
-                        device=self.device,
-                        compute_type=self.compute_type,
-                        cpu_threads=self.cpu_threads
-                    )
+                    try:
+                        self.model = WhisperModel(
+                            self.model_size,
+                            device=self.device,
+                            compute_type=self.compute_type,
+                            cpu_threads=self.cpu_threads
+                        )
+                    except Exception as e:
+                        logger.error("Failed to load Whisper model %s on %s: %s",
+                                     self.model_size, self.device, e)
+                        raise
         return self.model
     
     def clear_vram(self):
-        import gc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

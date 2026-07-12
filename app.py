@@ -33,14 +33,15 @@ from phrase_book import (
 )
 from templates import get_template, get_template_sections, render_template_prompt
 from config import TEMP_DIR, COMPLETED_DIR, CUSTOM_CATEGORIES_FILE, MAX_UPLOAD_SIZE_BYTES
-from pipeline_manager import submit_pdf_and_transcribe, cleanup_pipeline
+from pipeline_manager import submit_pdf_and_transcribe, cleanup_pipeline, get_pipeline
 from auth import authenticate_officer, register_officer, officer_exists
 from compliance_content import (
     get_compliance_html as _compliance_html,
     get_compliance_text as _compliance_text,
-    get_compliance_docx_sections,
-    get_compliance_pdf_elements,
 )
+from logger import get_logger
+
+logger = get_logger("app")
 
 st.set_page_config(
     page_title="Chronos - LE Report Assistance",
@@ -558,7 +559,7 @@ def mode_generate_report():
                 else:
                     with st.spinner("Generating narrative with LLM..."):
                         examples = get_style_examples(st.session_state['authenticated_officer'], report_type)
-                        tpl_prompt = st.session_state.pop('_template_prompt', None)
+                        tpl_prompt = st.session_state.get('_template_prompt')
 
                         corrections = get_recent_corrections(
                             st.session_state['authenticated_officer'], report_type, limit=3
@@ -681,6 +682,7 @@ def mode_generate_report():
                 <div class="desc">Upload evidence and click Generate Narrative, or enter notes directly on the left</div>
                 </div>""", unsafe_allow_html=True)
     except Exception as e:
+        logger.exception("Error in report generation: %s", e)
         st.error(f"An error occurred: {e}")
         st.exception(e)
 
@@ -763,6 +765,7 @@ def mode_configure_officer_style():
                 st.markdown("""<div class="empty-state"><div class="icon">&#128100;</div>
                 <div class="title">No Profiles Yet</div><div class="desc">Upload samples to build officer writing profiles</div></div>""", unsafe_allow_html=True)
     except Exception as e:
+        logger.exception("Error in officer profiles: %s", e)
         st.error(f"An error occurred: {e}")
         st.exception(e)
 
@@ -877,6 +880,7 @@ def mode_standalone_redactor():
                 st.markdown("""<div class="empty-state"><div class="icon">&#128274;</div>
                 <div class="title">No Text to Redact</div><div class="desc">Upload a document or paste text on the left</div></div>""", unsafe_allow_html=True)
     except Exception as e:
+        logger.exception("Error in PII redactor: %s", e)
         st.error(f"An error occurred: {e}")
         st.exception(e)
 
@@ -901,6 +905,7 @@ def mode_ai_compliance():
         with col3:
             st.download_button("\U0001F4DD  Text (.txt)", data=compliance_text, file_name=f"ai_compliance_{datetime.now().strftime('%Y%m%d')}.txt", mime="text/plain", use_container_width=True, key="cx_txt")
     except Exception as e:
+        logger.exception("Error in AI compliance: %s", e)
         st.error(f"An error occurred: {e}")
         st.exception(e)
 
@@ -988,6 +993,7 @@ def mode_audit_trail():
                 else:
                     st.info("No record found for that Case ID")
     except Exception as e:
+        logger.exception("Error in audit trail: %s", e)
         st.error(f"An error occurred: {e}")
         st.exception(e)
 
@@ -1012,5 +1018,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        cleanup_pipeline()
 

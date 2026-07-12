@@ -133,7 +133,7 @@ REDACTION_CATEGORIES = {
         "label": "License Plates",
         "description": "ABC-1234, ABCD-1234",
         "patterns": [
-            r'\b[A-Z]{2,4}[-\s]?\d{3,4}\b',
+            r'\b(?:(?:[A-Z]{2,4}[-\s]?\d{3,4})|(?:\d{3,4}[-\s]?[A-Z]{2,4}))\b',
         ],
         "replace": "[REDACTED_LICENSE_PLATE]",
     },
@@ -155,12 +155,17 @@ def sanitize_pii_content(raw_text: str, categories: Optional[Set[str]] = None) -
 
 
 def get_redaction_report(original: str, redacted: str) -> List[Tuple[str, str]]:
+    if original == redacted:
+        return []
     changes = []
     orig_lines = original.split('\n')
     red_lines = redacted.split('\n')
-    for orig, red in zip(orig_lines, red_lines):
+    max_len = max(len(orig_lines), len(red_lines))
+    for i in range(max_len):
+        orig = orig_lines[i].strip() if i < len(orig_lines) else ""
+        red = red_lines[i].strip() if i < len(red_lines) else ""
         if orig != red:
-            changes.append((orig.strip(), red.strip()))
+            changes.append((orig, red))
     return changes
 
 

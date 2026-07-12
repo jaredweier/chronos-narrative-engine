@@ -4,6 +4,9 @@ import glob
 from typing import List, Optional
 from pathlib import Path
 from config import PROFILES_DIR
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 SUPPORTED_SAMPLE_EXTENSIONS = ('.txt', '.pdf', '.docx')
 
@@ -90,7 +93,8 @@ def get_style_examples(officer_name: str, category: str, max_examples: int = 5) 
             content = extract_text_from_file(filepath).strip()
             if content:
                 examples.append(content)
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not read style sample %s: %s", filepath, e)
             continue
     
     return examples
@@ -123,8 +127,12 @@ def get_officer_categories(officer_name: str) -> List[str]:
 
 
 def delete_style_sample(officer_name: str, category: str, filename: str) -> bool:
-    category_dir = get_category_dir(officer_name, category)
-    filepath = os.path.join(category_dir, filename)
+    category_dir = os.path.realpath(get_category_dir(officer_name, category))
+    filepath = os.path.realpath(os.path.join(category_dir, filename))
+    
+    if not filepath.startswith(category_dir):
+        logger.warning("Path traversal attempt blocked: %s", filename)
+        return False
     
     if os.path.exists(filepath):
         os.remove(filepath)
