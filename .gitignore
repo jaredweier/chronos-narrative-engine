@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+officers.json
+department_reports.db
+temp_processing/
+completed_reports/
+officer_profiles/
+.streamlit/
+stderr.txt
+stdout.txt
+*.bat
+*.ps1
