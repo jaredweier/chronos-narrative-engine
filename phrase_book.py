@@ -9,27 +9,11 @@ from config import DB_PATH, DB_TIMEOUT
 _db_initialized = False
 
 
-@contextmanager
-def _get_conn():
-    global _db_initialized
-    if not _db_initialized:
-        initialize_phrase_book()
-        _db_initialized = True
+def initialize_phrase_book():
     conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def initialize_phrase_book():
-    with _get_conn() as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS phrase_book (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +44,28 @@ def initialize_phrase_book():
         conn.execute('''
             CREATE INDEX IF NOT EXISTS idx_rs_incident ON report_snapshots(incident_id)
         ''')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _get_conn():
+    global _db_initialized
+    if not _db_initialized:
+        _db_initialized = True
+        initialize_phrase_book()
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def add_phrase(officer_name: str, label: str, phrase_text: str, category: str = "General") -> int:

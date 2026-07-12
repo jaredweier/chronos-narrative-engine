@@ -9,27 +9,11 @@ from config import DB_PATH, DB_TIMEOUT
 _db_initialized = False
 
 
-@contextmanager
-def get_db_connection():
-    global _db_initialized
-    if not _db_initialized:
-        initialize_database()
-        _db_initialized = True
+def initialize_database():
     conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def initialize_database():
-    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS legal_audit_logs (
@@ -53,6 +37,28 @@ def initialize_database():
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_incident_id ON legal_audit_logs(incident_id)
         ''')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@contextmanager
+def get_db_connection():
+    global _db_initialized
+    if not _db_initialized:
+        _db_initialized = True
+        initialize_database()
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def log_submission(
