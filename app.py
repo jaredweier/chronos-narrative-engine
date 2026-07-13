@@ -40,6 +40,10 @@ from compliance_content import (
     get_compliance_text as _compliance_text,
 )
 from logger import get_logger
+from dashboard import mode_dashboard
+from health import run_all_checks, render_health_banner
+from draft import save_draft, clear_draft, render_draft_banner
+from diffview import render_diff_viewer
 
 logger = get_logger("app")
 
@@ -298,6 +302,9 @@ def init_session_state():
         initialize_database()
         initialize_phrase_book()
         st.session_state['_db_initialized'] = True
+    if '_health_checked' not in st.session_state:
+        st.session_state['_health_checks'] = run_all_checks()
+        st.session_state['_health_checked'] = True
     _cleanup_temp_files()
 
 
@@ -306,6 +313,7 @@ def login_gate():
     if st.session_state['authenticated_officer']:
         return True
     inject_css()
+    render_health_banner(st.session_state.get('_health_checks', []))
     badge = badge_html(80)
     st.markdown(f"""<div class="login-wrapper"><div class="login-card">
     <div style="display:flex;justify-content:center;margin-bottom:20px;">{badge}</div>
@@ -371,7 +379,7 @@ def render_sidebar():
         st.markdown(f"""<div class="sidebar-user"><div class="avatar">{h(initials)}</div><div>
         <div class="name">{officer_name_h}</div>
         <div class="badge-id">Badge #{officer_id_h}</div></div></div>""", unsafe_allow_html=True)
-        nav = st.radio("Navigation", ["Report Generation", "Officer Profiles", "PII Redactor", "AI Compliance", "Audit Trail"], key="nav_mode", label_visibility="collapsed")
+        nav = st.radio("Navigation", ["Dashboard", "Report Generation", "Officer Profiles", "PII Redactor", "AI Compliance", "Audit Trail"], key="nav_mode", label_visibility="collapsed")
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
         st.markdown("<div class='card-header'>Recent Reports</div>", unsafe_allow_html=True)
@@ -449,25 +457,43 @@ def mode_generate_report():
             video_file = st.file_uploader("Body Camera Footage", type=['mp4', 'mov', 'avi', 'mkv'], key="video_uploader", help="Supports files up to 10 GB")
 
             if pdf_file:
-                save_name = _safe_filename(pdf_file.name)
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', dir=TEMP_DIR) as tmp:
-                    tmp.write(pdf_file.read())
-                    st.session_state['pdf_path'] = tmp.name
-                st.success(f"CAD loaded: {pdf_file.name}")
+                file_size = pdf_file.size
+                max_size = 50 * 1024 * 1024
+                if file_size > max_size:
+                    st.error(f"PDF too large ({file_size / 1024 / 1024:.1f}MB). Max 50MB.")
+                else:
+                    save_name = _safe_filename(pdf_file.name)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', dir=TEMP_DIR) as tmp:
+                        tmp.write(pdf_file.read())
+                        st.session_state['pdf_path'] = tmp.name
+                    st.success(f"CAD loaded: {pdf_file.name} ({file_size / 1024:.0f}KB)")
 
             if video_file:
-                CHUNK_SIZE = 8 * 1024 * 1024
-                save_name = _safe_filename(video_file.name)
-                save_path = os.path.join(TEMP_DIR, save_name + '.video')
-                with open(save_path, 'wb') as f:
-                    while True:
-                        chunk = video_file.read(CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                st.session_state['video_path'] = save_path
-                st.success(f"Body cam loaded: {video_file.name}")
-                st.video(st.session_state['video_path'])
+                file_size = video_file.size
+                max_size = 10 * 1024 * 1024 * 1024
+                if file_size > max_size:
+                    st.error(f"Video too large ({file_size / 1024 / 1024 / 1024:.1f}GB). Max 10GB.")
+                else:
+                    CHUNK_SIZE = 8 * 1024 * 1024
+                    save_name = _safe_filename(video_file.name)
+                    save_path = os.path.join(TEMP_DIR, save_name + '.video')
+                    progress = st.progress(0, text=f"Uploading {video_file.name}...")
+                    with open(save_path, 'wb') as f:
+                        total_read = 0
+                        while True:
+                            chunk = video_file.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            total_read += len(chunk)
+                            if file_size > 0:
+                                progress.progress(min(total_read / file_size, 1.0))
+                    progress.empty()
+                    st.session_state['video_path'] = save_path
+                    st.success(f"Body cam loaded: {video_file.name} ({file_size / 1024 / 1024:.0f}MB)")
+                    st.video(st.session_state['video_path'])
+
+            render_draft_banner(st.session_state['authenticated_officer'])
 
             has_evidence = st.session_state.get('pdf_path') or st.session_state.get('video_path')
 
@@ -659,6 +685,9 @@ def mode_generate_report():
                     "Report", value=st.session_state['generated_report'],
                     height=400, key="report_editor", label_visibility="collapsed",
                 )
+                report_text = st.session_state.get('generated_report', '')
+                if report_text and st.session_state.get('original_ai_draft') and report_text != st.session_state.get('original_ai_draft'):
+                    save_draft(st.session_state['authenticated_officer'], report_text)
                 _render_export_buttons(st.session_state['generated_report'], label="incident_report", key_prefix="rpt")
                 verified = st.checkbox(
                     "I have reviewed this report and attest that the information is accurate to the best of my knowledge. I accept full professional and legal responsibility for this submission.",
@@ -933,13 +962,23 @@ def mode_audit_trail():
 
         with col_list:
             st.markdown("<div class='card-header'>Submission History</div>", unsafe_allow_html=True)
-            search_id = st.text_input("Search by Case ID", key="audit_search", placeholder="INC-20260711...")
+            search_id = st.text_input("Search Case ID or Officer", key="audit_search", placeholder="INC-20260711... or officer name...")
+            search_text = st.text_input("Search within report text", key="audit_search_text", placeholder="Search report content...", label_visibility="collapsed")
             from database import get_db_connection
             with get_db_connection() as conn:
-                if search_id:
+                if search_text and len(search_text) >= 2:
+                    like_phrase = f"%{search_text}%"
                     rows = conn.execute(
-                        "SELECT * FROM legal_audit_logs WHERE incident_id LIKE ? ORDER BY submission_timestamp DESC LIMIT 50",
-                        (f"%{search_id}%",)
+                        """SELECT * FROM legal_audit_logs
+                           WHERE incident_id LIKE ? OR officer_name LIKE ?
+                              OR unedited_ai_draft LIKE ? OR final_approved_report LIKE ?
+                           ORDER BY submission_timestamp DESC LIMIT 50""",
+                        (like_phrase, like_phrase, like_phrase, like_phrase)
+                    ).fetchall()
+                elif search_id:
+                    rows = conn.execute(
+                        "SELECT * FROM legal_audit_logs WHERE incident_id LIKE ? OR officer_name LIKE ? ORDER BY submission_timestamp DESC LIMIT 50",
+                        (f"%{search_id}%", f"%{search_id}%")
                     ).fetchall()
                 else:
                     rows = conn.execute(
@@ -952,8 +991,8 @@ def mode_audit_trail():
                     ver = ' &#10003;' if r.get('verification_signature_flag') else ''
                     st.markdown(f"""<div class="audit-row"><div><div class="ar-id">{h(r['incident_id'])}{ver}</div><div class="ar-type">{h(r['document_type'])} &bull; {h(r['officer_name'])}</div></div><div><span class="ar-mod {'ar-mod-yes' if r.get('was_modified_by_human') else 'ar-mod-no'}">{'modified' if r.get('was_modified_by_human') else 'as drafted'}</span><div class="ar-time">{ts}</div></div></div>""", unsafe_allow_html=True)
             else:
-                st.markdown("""<div class="empty-state"><div class="icon">&#128196;</div>
-                <div class="title">No Records Found</div><div class="desc">Submissions will appear here</div></div>""", unsafe_allow_html=True)
+                st.markdown("""<div class=\"empty-state\"><div class=\"icon\">&#128196;</div>
+                <div class=\"title\">No Records Found</div><div class=\"desc\">Submissions will appear here</div></div>""", unsafe_allow_html=True)
 
         with col_detail:
             st.markdown("<div class='card-header'>Record Detail</div>", unsafe_allow_html=True)
@@ -971,14 +1010,8 @@ def mode_audit_trail():
                     Modified: {mod_str} &bull; Verified: {ver_str}</span>
                     </div>""", unsafe_allow_html=True)
                     if record.get('unedited_ai_draft') and record.get('final_approved_report'):
-                        with st.expander("AI Draft vs Final Report", expanded=False):
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                st.markdown("<div style='font-size:0.68rem;font-weight:600;color:#94a3b8;margin-bottom:4px;'>AI DRAFT</div>", unsafe_allow_html=True)
-                                st.text_area("AI Draft", value=record['unedited_ai_draft'], height=300, disabled=True, key="audit_ai_draft", label_visibility="collapsed")
-                            with c2:
-                                st.markdown("<div style='font-size:0.68rem;font-weight:600;color:#94a3b8;margin-bottom:4px;'>FINAL REPORT</div>", unsafe_allow_html=True)
-                                st.text_area("Final Report", value=record['final_approved_report'], height=300, disabled=True, key="audit_final", label_visibility="collapsed")
+                        with st.expander("AI Draft vs Final Report", expanded=True):
+                            render_diff_viewer(record['unedited_ai_draft'], record['final_approved_report'])
                     elif record.get('final_approved_report'):
                         st.text_area("Report", value=record['final_approved_report'], height=300, disabled=True, key="audit_report_only", label_visibility="collapsed")
 
@@ -1005,7 +1038,9 @@ def main():
     if not login_gate():
         return
     nav = render_sidebar()
-    if nav == "Report Generation":
+    if nav == "Dashboard":
+        mode_dashboard()
+    elif nav == "Report Generation":
         mode_generate_report()
     elif nav == "Officer Profiles":
         mode_configure_officer_style()
