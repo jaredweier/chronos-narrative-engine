@@ -1,5 +1,4 @@
 import sqlite3
-import os
 from datetime import datetime
 from typing import List, Dict, Optional
 from contextlib import contextmanager
@@ -139,5 +138,16 @@ def get_snapshots(incident_id: str) -> List[Dict]:
             (incident_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+if __name__ == '__main__':
+    initialize_phrase_book()
+    print("Phrase book database initialized")
+    cats = get_phrase_categories("TestOfficer")
+    print(f"Categories for TestOfficer: {cats}")
+    add_phrase("TestOfficer", "Test Phrase", "This is a test phrase for demonstration.", "General")
+    phrases = get_phrases("TestOfficer", limit=5)
+    for p in phrases:
+        print(f"  [{p['category']}] {p['label']}: {p['phrase_text'][:60]}...")
 
 

@@ -1,12 +1,7 @@
 import os
-import socket
 import shutil
-import requests
-import sqlite3
-import streamlit as st
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
-from datetime import datetime
 
 from config import (
     OLLAMA_BASE_URL,
@@ -14,7 +9,6 @@ from config import (
     TEMP_DIR,
     COMPLETED_DIR,
     PROFILES_DIR,
-    DB_PATH,
     WHISPER_MODEL_SIZE,
     WHISPER_DEVICE,
 )
@@ -38,7 +32,11 @@ class HealthCheck:
 
 def check_ollama() -> HealthCheck:
     try:
-        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        try:
+            import requests as _req
+        except ModuleNotFoundError:
+            return HealthCheck("Ollama", False, "requests module not installed", "error")
+        r = _req.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         if r.status_code == 200:
             models = [m["name"] for m in r.json().get("models", [])]
             model_found = OLLAMA_MODEL in models or any(
@@ -56,13 +54,13 @@ def check_ollama() -> HealthCheck:
         return HealthCheck(
             "Ollama", False, f"Ollama API returned {r.status_code}", "error"
         )
-    except requests.ConnectionError:
-        return HealthCheck(
-            "Ollama", False,
-            f"Cannot reach {OLLAMA_BASE_URL}. Is Ollama running? (ollama serve)",
-            "error",
-        )
     except Exception as e:
+        if any(x in type(e).__name__ for x in ("ConnectionError", "ConnectError")):
+            return HealthCheck(
+                "Ollama", False,
+                f"Cannot reach {OLLAMA_BASE_URL}. Is Ollama running? (ollama serve)",
+                "error",
+            )
         return HealthCheck("Ollama", False, str(e), "error")
 
 
@@ -91,16 +89,15 @@ def check_dirs() -> List[HealthCheck]:
 
 def check_database() -> HealthCheck:
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM legal_audit_logs")
-        count = cursor.fetchone()[0]
-        conn.close()
+        from database import get_db_connection
+        with get_db_connection() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM legal_audit_logs").fetchone()[0]
         return HealthCheck("Database", True, f"{count} records in legal_audit_logs", "ok")
-    except sqlite3.OperationalError:
-        return HealthCheck("Database", True, "Empty database (tables not yet created)", "ok")
     except Exception as e:
-        return HealthCheck("Database", False, str(e), "error")
+        msg = str(e)
+        if "no such table" in msg:
+            return HealthCheck("Database", True, "Empty database (tables not yet created)", "ok")
+        return HealthCheck("Database", False, f"Database error: {msg}", "error")
 
 
 def check_whisper() -> HealthCheck:
@@ -126,7 +123,7 @@ def check_whisper() -> HealthCheck:
             "ok",
         )
     except Exception as e:
-        return HealthCheck("Whisper", True, f"Device check: {e}", "info")
+        return HealthCheck("Whisper", False, f"Device check failed: {e}", "warning")
 
 
 def run_all_checks() -> List[HealthCheck]:
@@ -139,6 +136,8 @@ def run_all_checks() -> List[HealthCheck]:
 
 
 def render_health_banner(checks: List[HealthCheck]):
+    import streamlit as st
+
     errors = [c for c in checks if c.severity == "error"]
     warnings = [c for c in checks if c.severity == "warning"]
 
@@ -159,6 +158,7 @@ def render_health_banner(checks: List[HealthCheck]):
 
 
 def render_health_dashboard(checks: List[HealthCheck]):
+    import streamlit as st
     cols = st.columns(len(checks))
     for i, c in enumerate(checks):
         with cols[i]:

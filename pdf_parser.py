@@ -1,5 +1,4 @@
 import json
-import requests
 from typing import Dict, Any, Optional
 from pathlib import Path
 
@@ -11,12 +10,12 @@ except ImportError:
 import pdfplumber
 
 from redactor import sanitize_pii_content
-from config import OLLAMA_API_ENDPOINT, OLLAMA_MODEL, LLM_COMPLIANCE_OPTIONS, LLM_COMPLIANCE_TIMEOUT
+from config import OLLAMA_MODEL
 from logger import get_logger
+from llm_provider import get_llm_provider
+from utils import extract_text_from_pdf
 
 logger = get_logger(__name__)
-
-from nibrs_checker import _extract_json
 
 
 class InvolvedParty(BaseModel):
@@ -35,18 +34,6 @@ class CadData(BaseModel):
     clear_time: str = Field(default="")
     involved_parties: list[InvolvedParty] = Field(default_factory=list)
     raw_text: str = Field(default="")
-
-
-def extract_text_from_pdf(pdf_path: str) -> str:
-    text_parts = []
-    
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(page_text)
-    
-    return "\n".join(text_parts)
 
 
 def query_ollama_structured(text: str, model: str = OLLAMA_MODEL) -> Optional[Dict[str, Any]]:
@@ -68,33 +55,14 @@ CAD REPORT TEXT:
 JSON:"""
 
     try:
-        response = requests.post(
-            OLLAMA_API_ENDPOINT,
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": LLM_COMPLIANCE_OPTIONS,
-            },
-            timeout=LLM_COMPLIANCE_TIMEOUT,
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        response_text = result.get("response", "")
-        
-        json_str = _extract_json(response_text)
-        if json_str and json_str[0] == '{':
-            return json.loads(json_str)
-        
-        logger.warning("No valid JSON found in Ollama response for CAD parsing")
+        provider = get_llm_provider()
+        result = provider.complete_json(prompt=prompt, timeout=60)
+        if isinstance(result, dict):
+            return result
+        logger.warning("No valid JSON found in LLM response for CAD parsing")
         return None
-        
-    except requests.RequestException as e:
-        logger.error("Ollama CAD query network error: %s", e)
-        return None
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error("Ollama CAD query parse error: %s", e)
+    except Exception as e:
+        logger.error("CAD query error: %s", e)
         return None
 
 
@@ -123,31 +91,17 @@ def _build_cad_data(parsed_data: dict, processed_text: str) -> CadData:
 
 def parse_zuercher_pdf(pdf_path: str, redact: bool = True) -> CadData:
     raw_text = extract_text_from_pdf(pdf_path)
-    
+
     if redact:
         processed_text = sanitize_pii_content(raw_text)
     else:
         processed_text = raw_text
-    
+
     parsed_data = query_ollama_structured(processed_text)
-    
+
     if parsed_data:
         return _build_cad_data(parsed_data, processed_text)
-    
-    return CadData(raw_text=processed_text)
 
-
-def parse_zuercher_text(text: str, redact: bool = True) -> CadData:
-    if redact:
-        processed_text = sanitize_pii_content(text)
-    else:
-        processed_text = text
-    
-    parsed_data = query_ollama_structured(processed_text)
-    
-    if parsed_data:
-        return _build_cad_data(parsed_data, processed_text)
-    
     return CadData(raw_text=processed_text)
 
 

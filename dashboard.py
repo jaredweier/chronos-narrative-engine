@@ -1,14 +1,17 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from html import escape as h
 from typing import Dict, Any, List
-from database import get_db_connection, get_statistics
-from health import run_all_checks, render_health_dashboard, check_ollama, check_whisper
+from database import get_db_connection, get_statistics, get_review_counts
+from health import run_all_checks, render_health_dashboard
+from ui import render_department_header
 from logger import get_logger
 
 logger = get_logger(__name__)
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_recent_activity(days: int = 30, limit: int = 50) -> List[Dict[str, Any]]:
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     with get_db_connection() as conn:
@@ -24,11 +27,13 @@ def get_recent_activity(days: int = 30, limit: int = 50) -> List[Dict[str, Any]]
         return [dict(r) for r in rows]
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_report_type_distribution() -> Dict[str, int]:
     stats = get_statistics()
     return stats.get("by_document_type", {})
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_officer_activity(limit: int = 10) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
@@ -45,6 +50,7 @@ def get_officer_activity(limit: int = 10) -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_submissions_by_day(days: int = 30) -> pd.DataFrame:
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     with get_db_connection() as conn:
@@ -66,6 +72,7 @@ def get_submissions_by_day(days: int = 30) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=10, show_spinner=False)
 def get_modification_rate() -> float:
     stats = get_statistics()
     total = stats["total_submissions"]
@@ -76,8 +83,6 @@ def get_modification_rate() -> float:
 
 def mode_dashboard():
     try:
-        from app import render_department_header, inject_css
-
         render_department_header()
 
         st.markdown("<div class='card-header'>System Health</div>", unsafe_allow_html=True)
@@ -95,6 +100,21 @@ def mode_dashboard():
                 unsafe_allow_html=True,
             )
             return
+
+        role = st.session_state.get('_user_role', '')
+        if role in ('supervisor', 'admin'):
+            counts = get_review_counts()
+            pending = counts.get('pending', 0)
+            if pending > 0:
+                st.markdown(
+                    f"""<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:16px;
+                    border:1px solid #f59e0b44;border-radius:8px;background:#f59e0b0d;">
+                    <span style="font-size:1.1rem;">&#128276;</span>
+                    <div><span style="font-weight:600;color:#fbbf24;font-size:0.85rem;">{pending} Report(s) Pending Review</span>
+                    <div style="font-size:0.65rem;color:#94a3b8;">Go to Supervisor Review to approve or request changes</div></div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
 
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
         st.markdown("<div class='card-header'>Overview</div>", unsafe_allow_html=True)
@@ -174,8 +194,8 @@ def mode_dashboard():
                     ver = "\u2713" if r.get("verification_signature_flag") else ""
                     st.markdown(
                         f"""<div class="recent-item" style="padding:6px 10px;">
-                        <div><span class="ri-id">{r['incident_id'][:25]}</span>
-                        <span style="font-size:0.6rem;opacity:0.4;"> {r['officer_name']}</span></div>
+                        <div><span class="ri-id">{h(r['incident_id'][:25])}</span>
+                        <span style="font-size:0.6rem;opacity:0.4;"> {h(r['officer_name'])}</span></div>
                         <div><span style="font-size:0.6rem;">{ts}</span> {mod} {ver}</div></div>""",
                         unsafe_allow_html=True,
                     )
@@ -194,7 +214,7 @@ def mode_dashboard():
                         f"""<div style="display:flex;justify-content:space-between;
                         align-items:center;padding:6px 10px;border:1px solid #1e293b;
                         border-radius:4px;margin-bottom:4px;font-size:0.66rem;">
-                        <div><strong>{o['officer_name']}</strong></div>
+                        <div><strong>{h(o['officer_name'])}</strong></div>
                         <div style="display:flex;gap:8px;opacity:0.6;">
                         <span>{o['report_count']} reports</span>
                         <span>{o['verified_count']} verified</span></div></div>""",

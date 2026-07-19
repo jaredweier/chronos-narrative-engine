@@ -116,76 +116,12 @@ def get_compliance_text(officer: str = "", badge_num: str = "") -> str:
     return "\n".join(lines)
 
 
-def get_compliance_docx_sections(doc):
-    from docx.shared import Pt, RGBColor
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("ARTIFICIAL INTELLIGENCE\nSAFEGUARDS & GUARDRAILS CERTIFICATION")
-    run.bold = True
-    run.font.size = Pt(16)
-    run.font.color.rgb = RGBColor(30, 58, 138)
-
-    sub = doc.add_paragraph()
-    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = sub.add_run("Chronos Narrative Engine - Law Enforcement Report Generation System")
-    run.font.size = Pt(10)
-    run.font.color.rgb = RGBColor(100, 116, 139)
-
-    doc.add_paragraph()
-
+if __name__ == '__main__':
+    print(f"Compliance Content: {len(COMPLIANCE_SECTIONS)} sections")
     for heading, items in COMPLIANCE_SECTIONS:
-        plain_heading = heading.replace("&amp;", "&").replace("&mdash;", "-")
-        h = doc.add_paragraph()
-        run = h.add_run(plain_heading)
-        run.bold = True
-        run.font.size = Pt(12)
-        run.font.color.rgb = RGBColor(30, 58, 138)
-        for item in items:
-            plain_item = item.replace("&amp;", "&").replace("&mdash;", "-").replace("&bull;", "*")
-            p = doc.add_paragraph(style='List Bullet')
-            run = p.add_run(plain_item)
-            run.font.size = Pt(10)
-            run.font.name = 'Times New Roman'
+        print(f"  {heading}: {len(items)} items")
+    print("\n--- Text output ---")
+    print(get_compliance_text("Officer Test", "B1234"))
 
 
-def get_compliance_pdf_elements():
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.colors import HexColor
-    from reportlab.lib.enums import TA_CENTER
-    from reportlab.platypus import Paragraph, Spacer, HRFlowable
 
-    styles = getSampleStyleSheet()
-    elements = []
-
-    title_style = ParagraphStyle(
-        'ComplianceTitle', parent=styles['Title'], fontSize=16,
-        textColor=HexColor('#1E3A8A'), alignment=TA_CENTER,
-        fontName='Helvetica-Bold', spaceAfter=4,
-    )
-    subtitle_style = ParagraphStyle(
-        'ComplianceSubtitle', parent=styles['Normal'], fontSize=9,
-        textColor=HexColor('#64748B'), alignment=TA_CENTER, spaceAfter=12,
-    )
-    section_style = ParagraphStyle(
-        'ComplianceSection', parent=styles['Heading2'], fontSize=12,
-        textColor=HexColor('#1E3A8A'), fontName='Helvetica-Bold',
-        spaceBefore=14, spaceAfter=6,
-    )
-    bullet_style = ParagraphStyle(
-        'ComplianceBullet', parent=styles['Normal'], fontSize=10,
-        leading=14, fontName='Times-Roman', leftIndent=20, spaceAfter=3, bulletIndent=8,
-    )
-
-    elements.append(Paragraph("ARTIFICIAL INTELLIGENCE<br/>SAFEGUARDS &amp; GUARDRAILS CERTIFICATION", title_style))
-    elements.append(Paragraph("Chronos Narrative Engine - Law Enforcement Report Generation System", subtitle_style))
-    elements.append(HRFlowable(width="100%", thickness=2, color=HexColor('#1E3A8A'), spaceAfter=12))
-
-    for heading, items in COMPLIANCE_SECTIONS:
-        elements.append(Paragraph(heading, section_style))
-        for item in items:
-            safe = item.replace('<', '&lt;').replace('>', '&gt;')
-            elements.append(Paragraph(f"* {safe}", bullet_style))
-
-    return elements

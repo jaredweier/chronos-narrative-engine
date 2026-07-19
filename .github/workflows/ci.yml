@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff
+      - run: ruff check --select E,F,I,N,W .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install mypy types-requests types-python-dateutil
+      - run: mypy --ignore-missing-imports --python-version "3.10" --exclude venv .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest tests/ -v
+
+  parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -c "
+        import ast, os
+        errors = []
+        for dirpath, dirnames, files in os.walk('.'):
+            if 'venv' in dirpath or '__pycache__' in dirpath: continue
+            for f in files:
+                if f.endswith('.py'):
+                    try: ast.parse(open(os.path.join(dirpath,f),encoding='utf-8').read())
+                    except SyntaxError as e: errors.append(os.path.relpath(os.path.join(dirpath,f),'.')+': '+str(e))
+        assert not errors, '\\n'.join(errors)
+        print('All Python files parse OK')
+        "

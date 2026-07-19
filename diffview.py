@@ -63,9 +63,18 @@ def render_diff_viewer(ai_draft: str, final_report: str):
         unsafe_allow_html=True,
     )
 
+
+if __name__ == '__main__':
+    a = "Line one\nLine two\nLine three\n"
+    b = "Line one\nLine two modified\nLine three\nLine four\n"
+    changes = compute_diff(a, b)
+    print("Diff test:")
+    print(f"  {sum(1 for k,_ in changes if k=='added')} additions, "
+          f"{sum(1 for k,_ in changes if k=='removed')} removals")
+
     view_mode = st.radio(
         "View Mode",
-        ["Unified Diff", "Side by Side"],
+        ["Unified Diff", "Split View"],
         horizontal=True,
         key="diff_view_mode",
         label_visibility="collapsed",

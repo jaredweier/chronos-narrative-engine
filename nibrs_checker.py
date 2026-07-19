@@ -1,28 +1,11 @@
 import json
 import re
-import requests
 from typing import List, Dict, Any
-from config import OLLAMA_API_ENDPOINT, OLLAMA_MODEL, LLM_COMPLIANCE_OPTIONS, LLM_COMPLIANCE_TIMEOUT
+from config import OLLAMA_MODEL
 from logger import get_logger
+from llm_provider import get_llm_provider
 
 logger = get_logger(__name__)
-
-
-def _extract_json(text: str) -> str:
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```", "", text)
-    for open_char, close_char in [("[", "]"), ("{", "}")]:
-        start = text.find(open_char)
-        if start >= 0:
-            depth = 0
-            for i in range(start, len(text)):
-                if text[i] == open_char:
-                    depth += 1
-                elif text[i] == close_char:
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i+1]
-    return ""
 
 
 NIBRS_REQUIREMENTS = {
@@ -88,37 +71,13 @@ If the narrative is fully compliant, return an empty array [].
 COMPLIANCE CHECK:"""
 
     try:
-        response = requests.post(
-            OLLAMA_API_ENDPOINT,
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": LLM_COMPLIANCE_OPTIONS
-            },
-            timeout=LLM_COMPLIANCE_TIMEOUT
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        response_text = result.get("response", "")
-        
-        json_str = _extract_json(response_text)
-        if json_str and json_str[0] == '[':
-            return json.loads(json_str)
-        
+        provider = get_llm_provider()
+        result = provider.complete_json(prompt=prompt, timeout=60)
+        if isinstance(result, list):
+            return result
         return []
-        
-    except requests.RequestException as e:
-        logger.error("NIBRS check network error: %s", e)
-        return [{
-            "element": "system_error",
-            "severity": "warning",
-            "message": f"NIBRS check could not be completed: {str(e)}",
-            "suggestion": "Verify Ollama is running and Llama 3.1:8b is available"
-        }]
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error("NIBRS check parse error: %s", e)
+    except Exception as e:
+        logger.error("NIBRS check error: %s", e)
         return []
 
 
@@ -155,6 +114,34 @@ def format_compliance_report(warnings: List[Dict[str, Any]]) -> str:
         lines.append("")
     
     return "\n".join(lines)
+
+
+_NEGATION_WORDS = frozenset({
+    'no', 'not', 'without', 'never', 'none', 'nobody', 'nothing', 'nowhere',
+    'neither', 'nor', "didn't", "wasn't", "weren't", "hadn't", "hasn't",
+    "haven't", "isn't", "aren't", "couldn't", "wouldn't", "shouldn't",
+    "doesn't", "don't", "did not", "was not", "were not", "had not",
+    "has not", "have not", "is not", "are not", "could not", "would not",
+    "should not", "does not", "do not", "no evidence", "no sign", "no indication",
+})
+
+
+def _keyword_in_affirmative(text: str, keyword: str) -> bool:
+    pattern = re.compile(r'\b' + re.escape(keyword) + r'\b')
+    for match in pattern.finditer(text):
+        start = max(0, match.start() - 50)
+        preceding = text[start:match.start()].strip()
+        if not preceding:
+            return True
+        tokens = preceding.lower().split()
+        negated = any(
+            ' '.join(tokens[max(0, i-2):i+1]) in _NEGATION_WORDS
+            or tokens[i] in _NEGATION_WORDS
+            for i in range(len(tokens))
+        )
+        if not negated:
+            return True
+    return False
 
 
 def suggest_missing_fields(call_type: str, narrative_text: str, model: str = OLLAMA_MODEL) -> List[Dict[str, Any]]:
@@ -198,7 +185,7 @@ def suggest_missing_fields(call_type: str, narrative_text: str, model: str = OLL
     present = []
     for req in requirements:
         keywords = KEYWORD_REQUIRED.get(req, req.replace("_", " ").lower().split())
-        matches = sum(1 for kw in keywords if kw in narrative_lower)
+        matches = sum(1 for kw in keywords if _keyword_in_affirmative(narrative_lower, kw))
         if matches >= 2:
             present.append(req)
 
@@ -222,21 +209,10 @@ For each missing element, provide a brief actionable suggestion of what the offi
 
 Return ONLY the JSON array, nothing else."""
 
-        response = requests.post(
-            OLLAMA_API_ENDPOINT,
-            json={"model": model, "prompt": prompt, "stream": False,
-                  "options": LLM_COMPLIANCE_OPTIONS},
-            timeout=LLM_COMPLIANCE_TIMEOUT
-        )
-        response.raise_for_status()
-        text = response.json().get("response", "")
-        json_str = _extract_json(text)
-        if json_str and json_str[0] == '[':
-            return json.loads(json_str)
-    except requests.RequestException as e:
-        logger.error("Missing fields net error: %s", e)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.debug("Missing fields parse error: %s", e)
+        provider = get_llm_provider()
+        result = provider.complete_json(prompt=prompt, timeout=60)
+        if isinstance(result, list):
+            return result
     except Exception as e:
         logger.error("suggest_missing_fields: %s", e)
 
@@ -268,21 +244,10 @@ Return a JSON object with:
 Return ONLY the JSON object, nothing else."""
 
     try:
-        response = requests.post(
-            OLLAMA_API_ENDPOINT,
-            json={"model": model, "prompt": prompt, "stream": False,
-                  "options": LLM_COMPLIANCE_OPTIONS},
-            timeout=LLM_COMPLIANCE_TIMEOUT
-        )
-        response.raise_for_status()
-        text = response.json().get("response", "")
-        json_str = _extract_json(text)
-        if json_str and json_str[0] == '{':
-            return json.loads(json_str)
-    except requests.RequestException as e:
-        logger.error("Probable cause net error: %s", e)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.debug("Probable cause parse error: %s", e)
+        provider = get_llm_provider()
+        result = provider.complete_json(prompt=prompt, timeout=60)
+        if isinstance(result, dict):
+            return result
     except Exception as e:
         logger.error("check_probable_cause: %s", e)
 
