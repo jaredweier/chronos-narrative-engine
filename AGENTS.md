@@ -127,8 +127,18 @@ Dashboard, health checks, auto-save, diffview, upload UX improvements. (Commit `
 ### Session 4 — Code Review Fixes (18 items, 159→205 tests)
 All 18 code-review issues resolved, 46 new tests added, all 205 passing.
 
-### Session 5 — State Handoff & Commit (This Session)
+### Session 5 — State Handoff & Commit
 Updated AGENTS.md with session history, committed all outstanding code-review fixes. All 205 tests verified passing on Python 3.14.6 / pytest 9.1.1.
+
+### Session 6 — Video Transcription Improvements (This Session)
+Overhauled the video transcription pipeline with 7 improvements:
+- **FFmpeg audio extraction** — `extract_audio_from_video()` with `_check_ffmpeg()` guard for transparent video→audio conversion
+- **Progress callback** — `progress_callback(current, total)` throughout `transcribe_file()` → `transcribe_to_text()` → `transcribe_bodycam()` chain, used in UI via `st.progress`
+- **Long audio chunking** — `_split_audio_chunks()` splits audio >30min into segments, transcribes independently, re-joins with cumulative timestamps
+- **Cancellation support** — `cancel()` / `reset_cancel()` on `BodyCamTranscriber` via `_cancel_event` threading.Event; `cancel_transcription()` public API; `_check_cancelled()` gates in transcription loop
+- **Fixed double audio load** — `AudioPreprocessor.preprocess()` now loads audio once and passes `(y, sr)` to processing methods instead of re-loading in `trim_silence()`/`needs_noise_reduction()`
+- **Fixed video file extension** — Upload handler saves with original extension (e.g. `.mp4`) instead of `.video` suffix
+- **Added `cancel()` to provider** — `TranscriberProvider` ABC and `WhisperTranscriberProvider` now expose `cancel()` for graceful interruption
 
 ## Running Tests
 ```powershell
@@ -146,7 +156,7 @@ python -m pytest tests/test_database.py::TestAuditChain -v
 ```
 
 ## Next Session
-All code-review fixes committed. Project is stable with 205 passing tests.
+Video transcription improvements complete. 205 tests passing.
 
 ### Suggested Focus Areas (priority order)
 1. **Statute citation auto-linking** — Scan generated narratives and link WI statute references (e.g., `§ 940.01`) to the statute DB for hover/click lookup

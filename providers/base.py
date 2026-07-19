@@ -51,7 +51,10 @@ class LLMProvider(ABC):
 
 class TranscriberProvider(ABC):
     @abstractmethod
-    def transcribe(self, audio_path: str, language: str = "en", initial_prompt: Optional[str] = None) -> str:
+    def transcribe(self, audio_path: str, language: str = "en", initial_prompt: Optional[str] = None, progress_callback: Optional[Callable[[int, int], None]] = None) -> str:
+        ...
+
+    def cancel(self):
         ...
 
     @abstractmethod

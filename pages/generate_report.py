@@ -56,7 +56,10 @@ def _render_evidence_upload():
         if video_file.size > max_video:
             st.error(f"Video too large ({video_file.size / 1024 / 1024 / 1024:.1f}GB). Max 10GB.")
         else:
-            save_path = os.path.join(TEMP_DIR, safe_filename(video_file.name) + '.video')
+            _, ext = os.path.splitext(video_file.name)
+            if not ext:
+                ext = '.mp4'
+            save_path = os.path.join(TEMP_DIR, safe_filename(video_file.name))
             progress = st.progress(0, text=f"Uploading {video_file.name}...")
             with open(save_path, 'wb') as f:
                 total = 0
@@ -77,25 +80,29 @@ def _render_evidence_upload():
 
     if st.session_state.get('pdf_path') or st.session_state.get('video_path'):
         if st.button("Process Evidence", type="primary", use_container_width=True, key="process_btn"):
-            with st.spinner("Processing evidence..."):
-                cad_result, transcript_result = None, None
-                pdf = st.session_state.get('pdf_path')
-                video = st.session_state.get('video_path')
-                if pdf and video:
+            cad_result, transcript_result = None, None
+            pdf = st.session_state.get('pdf_path')
+            video = st.session_state.get('video_path')
+            if pdf and video:
+                with st.spinner("Processing CAD PDF and transcribing bodycam footage..."):
                     cad_result, transcript_result = submit_pdf_and_transcribe(pdf, video)
-                elif pdf:
+            elif pdf:
+                with st.spinner("Parsing CAD PDF..."):
                     cad_result = parse_zuercher_pdf(pdf)
-                elif video:
-                    from config import WHISPER_INITIAL_PROMPT
-                    transcript_result = transcribe_bodycam(video, initial_prompt=WHISPER_INITIAL_PROMPT)
-                    from spell_check import auto_correct_transcript
-                    if transcript_result:
-                        transcript_result = auto_correct_transcript(transcript_result)
-                    cleanup_transcriber()
-                if cad_result is not None:
-                    st.session_state['cad_data'] = cad_result
-                if transcript_result is not None:
-                    st.session_state['transcript'] = transcript_result
+            elif video:
+                from config import WHISPER_INITIAL_PROMPT
+                trans_prog = st.progress(0, text="Extracting and transcribing audio...")
+                def _on_progress(current, total):
+                    trans_prog.progress(current / total, text=f"Transcribing chunk {current}/{total}")
+                transcript_result = transcribe_bodycam(video, initial_prompt=WHISPER_INITIAL_PROMPT, progress_callback=_on_progress)
+                trans_prog.empty()
+                from spell_check import auto_correct_transcript
+                if transcript_result:
+                    transcript_result = auto_correct_transcript(transcript_result)
+            if cad_result is not None:
+                st.session_state['cad_data'] = cad_result
+            if transcript_result is not None:
+                st.session_state['transcript'] = transcript_result
             st.success("Evidence processed")
             st.rerun()
 
