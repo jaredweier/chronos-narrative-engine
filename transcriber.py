@@ -64,15 +64,21 @@ def extract_audio_from_video(video_path: str) -> Optional[str]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
 @dataclass
 class WordTimestamp:
     word: str
     start: float
     end: float
     probability: float = 0.0
+    speaker: Optional[str] = None
 
     def format(self) -> str:
-        return f"{self.word}[{self.start:.2f}-{self.end:.2f}]"
+        speaker_tag = f"<{self.speaker}> " if self.speaker else ""
+        return f"{speaker_tag}{self.word}[{self.start:.2f}-{self.end:.2f}]"
 
 
 @dataclass
@@ -84,6 +90,8 @@ class TranscriptSegment:
     compression_ratio: float = 0.0
     avg_logprob: float = 0.0
     words: List[WordTimestamp] = None
+    speaker: Optional[str] = None
+    confidence_tier: str = "high"
 
     def __post_init__(self):
         if self.words is None:
@@ -96,6 +104,14 @@ class TranscriptSegment:
             return sum(probs) / len(probs)
         return max(0.0, 1.0 - self.no_speech_prob)
 
+    @property
+    def is_low_confidence(self) -> bool:
+        return self.confidence_tier in ("low", "uncertain")
+
+
+# ---------------------------------------------------------------------------
+# Audio preprocessing
+# ---------------------------------------------------------------------------
 
 class AudioPreprocessor:
     @staticmethod
@@ -111,10 +127,7 @@ class AudioPreprocessor:
         try:
             import noisereduce as nr
             y_denoised = nr.reduce_noise(
-                y=y,
-                sr=sr,
-                stationary=True,
-                prop_decrease=strength,
+                y=y, sr=sr, stationary=True, prop_decrease=strength,
             )
             return y_denoised
         except ImportError:
@@ -131,7 +144,7 @@ class AudioPreprocessor:
                 AudioPreprocessor._deepfilter_model = DeepFilterModel()
                 logger.info("Loaded DeepFilterNet3 model for noise suppression")
             except ImportError:
-                logger.warning("deepfilter-stream not installed, falling back to noisereduce")
+                logger.warning("deepfilter-stream not installed")
                 return None
             except Exception as e:
                 logger.warning("Failed to load DeepFilterNet3 model: %s", e)
@@ -155,7 +168,7 @@ class AudioPreprocessor:
             stream.reset()
             return enhanced
         except Exception as e:
-            logger.warning("DeepFilterNet3 processing failed: %s, falling back to original audio", e)
+            logger.warning("DeepFilterNet3 processing failed: %s", e)
             return y
 
     @staticmethod
@@ -182,7 +195,6 @@ class AudioPreprocessor:
         import soundfile as sf
         base, ext = os.path.splitext(audio_path)
         out_path = f"{base}_enhanced.wav"
-
         y, sr = librosa.load(audio_path, sr=16000, mono=True)
         y = self.trim_silence(y, sr)
         y = self.normalize_loudness(y, sr)
@@ -194,16 +206,17 @@ class AudioPreprocessor:
             logger.info("Applying noise reduction method=%s strength=%.2f",
                         WHISPER_NOISE_REDUCE_METHOD, WHISPER_NOISE_REDUCE_STRENGTH)
             y = self.reduce_noise(y, sr, strength=WHISPER_NOISE_REDUCE_STRENGTH)
-
         sf.write(out_path, y, sr)
         return out_path
 
 
+# ---------------------------------------------------------------------------
+# Hallucination detection
+# ---------------------------------------------------------------------------
+
 _HALLUCINATION_COMPRESSION_RATIO_MAX = 2.0
 _HALLUCINATION_NO_SPEECH_PROB_MAX = 0.5
 _HALLUCINATION_AVG_LOGPROB_MIN = -1.0
-
-_MAX_CHUNK_DURATION_SECONDS = 1800
 
 
 def _is_hallucinated_segment(seg) -> bool:
@@ -216,35 +229,152 @@ def _is_hallucinated_segment(seg) -> bool:
     return False
 
 
-def _get_audio_duration(audio_path: str) -> float:
-    import librosa
+# ---------------------------------------------------------------------------
+# Confidence tier classifier
+# ---------------------------------------------------------------------------
+
+_CONFIDENCE_TIER_THRESHOLDS = [
+    (0.9, "high"),
+    (0.7, "medium"),
+    (0.5, "low"),
+]
+
+
+def _classify_confidence_tier(confidence: float) -> str:
+    for threshold, tier in _CONFIDENCE_TIER_THRESHOLDS:
+        if confidence >= threshold:
+            return tier
+    return "uncertain"
+
+
+# ---------------------------------------------------------------------------
+# Forced alignment (optional — requires transformers)
+# ---------------------------------------------------------------------------
+
+def _has_transformers() -> bool:
     try:
-        dur = librosa.get_duration(filename=audio_path)
-        return dur
-    except Exception:
-        return 0.0
+        import transformers
+        return True
+    except ImportError:
+        return False
 
 
-def _split_audio_chunks(audio_path: str, max_duration: int = _MAX_CHUNK_DURATION_SECONDS) -> List[str]:
-    import librosa
-    import soundfile as sf
-    y, sr = librosa.load(audio_path, sr=16000, mono=True)
-    total_samples = len(y)
-    chunk_samples = max_duration * sr
-    if total_samples <= chunk_samples:
-        return [audio_path]
+_alignment_pipeline = None
+_alignment_lock = threading.Lock()
 
-    base, ext = os.path.splitext(audio_path)
-    chunks = []
-    for start_sample in range(0, total_samples, chunk_samples):
-        end_sample = min(start_sample + chunk_samples, total_samples)
-        chunk_y = y[start_sample:end_sample]
-        chunk_path = f"{base}_chunk_{start_sample // chunk_samples}.wav"
-        sf.write(chunk_path, chunk_y, sr)
-        chunks.append(chunk_path)
-    logger.info("Split audio into %d chunks (max %ds each)", len(chunks), max_duration)
-    return chunks
 
+def _get_alignment_pipeline():
+    global _alignment_pipeline
+    if _alignment_pipeline is None:
+        with _alignment_lock:
+            if _alignment_pipeline is None:
+                try:
+                    from transformers import pipeline, Pipeline
+                    _alignment_pipeline = pipeline(
+                        "automatic-speech-recognition",
+                        "facebook/wav2vec2-large-960h-lv60-self",
+                    )
+                    logger.info("Loaded wav2vec2 alignment model")
+                except Exception as e:
+                    logger.warning("Failed to load alignment model: %s", e)
+                    _alignment_pipeline = False
+    return _alignment_pipeline if _alignment_pipeline is not False else None
+
+
+def _align_words_with_wav2vec2(audio: np.ndarray, segments: List[TranscriptSegment], sr: int = 16000) -> List[TranscriptSegment]:
+    aligner = _get_alignment_pipeline()
+    if aligner is None:
+        return segments
+
+    try:
+        full_text = " ".join(s.text for s in segments)
+        result = aligner(audio, return_timestamps="word", chunk_length_s=30)
+        word_chunks = result.get("chunks", [])
+
+        word_index = 0
+        for seg in segments:
+            aligned_words = []
+            for chunk in word_chunks:
+                w_start, w_end = chunk.get("timestamp", (None, None))
+                if w_start is None or w_end is None:
+                    continue
+                w_text = chunk.get("text", "").strip()
+                if not w_text:
+                    continue
+                aligned_words.append(WordTimestamp(
+                    word=w_text, start=w_start, end=w_end,
+                    probability=seg.words[word_index].probability if word_index < len(seg.words) else 0.0,
+                ))
+                word_index += 1
+            seg.words = aligned_words
+
+        logger.info("Forced alignment applied to %d segments", len(segments))
+    except Exception as e:
+        logger.warning("Forced alignment failed: %s", e)
+
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# Speaker diarization (optional — requires pyannote.audio)
+# ---------------------------------------------------------------------------
+
+def _has_pyannote() -> bool:
+    try:
+        import pyannote.audio
+        return True
+    except ImportError:
+        return False
+
+
+_diarization_pipeline = None
+_diarization_lock = threading.Lock()
+
+
+def _get_diarization_pipeline():
+    global _diarization_pipeline
+    if _diarization_pipeline is None:
+        with _diarization_lock:
+            if _diarization_pipeline is None:
+                try:
+                    from pyannote.audio import Pipeline
+                    _diarization_pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        use_auth_token=None,
+                    )
+                    logger.info("Loaded pyannote speaker diarization pipeline")
+                except Exception as e:
+                    logger.warning("Failed to load diarization pipeline: %s", e)
+                    _diarization_pipeline = False
+    return _diarization_pipeline if _diarization_pipeline is not False else None
+
+
+def _apply_diarization(audio_path: str, segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
+    pipeline = _get_diarization_pipeline()
+    if pipeline is None:
+        return segments
+
+    try:
+        diarization = pipeline(audio_path)
+        speaker_map = {}
+        for seg in segments:
+            mid = (seg.start + seg.end) / 2
+            speaker = diarization.crop(mid)
+            if speaker:
+                label = list(speaker.labels())[0]
+                seg.speaker = label
+                for w in seg.words:
+                    w.speaker = label
+        logger.info("Speaker diarization applied to %d segments", len(segments))
+    except Exception as e:
+        logger.warning("Speaker diarization failed: %s", e)
+
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# Main transcriber
+# ---------------------------------------------------------------------------
 
 class BodyCamTranscriber:
     def __init__(
@@ -255,6 +385,9 @@ class BodyCamTranscriber:
         cpu_threads: int = WHISPER_CPU_THREADS,
         batch_size: int = WHISPER_BATCH_SIZE,
         beam_size: int = WHISPER_BEAM_SIZE,
+        use_batched: bool = True,
+        enable_alignment: bool = True,
+        enable_diarization: bool = True,
     ):
         self.model_size = model_size
         self.device = device
@@ -262,7 +395,11 @@ class BodyCamTranscriber:
         self.cpu_threads = cpu_threads
         self.batch_size = batch_size
         self.beam_size = beam_size
+        self.use_batched = use_batched
+        self.enable_alignment = enable_alignment
+        self.enable_diarization = enable_diarization
         self.model = None
+        self._batched_pipeline = None
         self._model_lock = threading.Lock()
         self._cancel_event = threading.Event()
 
@@ -292,6 +429,16 @@ class BodyCamTranscriber:
                             self.model_size, self.device, self.compute_type,
                             self.batch_size, self.beam_size,
                         )
+                        if self.use_batched:
+                            try:
+                                from faster_whisper import BatchedInferencePipeline
+                                self._batched_pipeline = BatchedInferencePipeline(
+                                    model=self.model, use_vad_model=True,
+                                )
+                                logger.info("BatchedInferencePipeline enabled for 4x throughput")
+                            except Exception as e:
+                                logger.warning("Failed to init BatchedInferencePipeline: %s", e)
+                                self._batched_pipeline = None
                     except Exception as e:
                         logger.error("Failed to load Whisper model %s on %s: %s",
                                      self.model_size, self.device, e)
@@ -337,9 +484,36 @@ class BodyCamTranscriber:
 
         return prompt
 
-    def _transcribe_single(
+    @staticmethod
+    def _segments_from_raw(raw_segments) -> Tuple[List[TranscriptSegment], int, int]:
+        segments = []
+        hallucinated_count = 0
+        total_words = 0
+        for segment in raw_segments:
+            if _is_hallucinated_segment(segment):
+                hallucinated_count += 1
+                continue
+            word_list = []
+            word_timestamps_raw = getattr(segment, 'words', None)
+            if word_timestamps_raw:
+                for w in word_timestamps_raw:
+                    word_list.append(WordTimestamp(
+                        word=w.word, start=w.start, end=w.end,
+                        probability=getattr(w, 'probability', 0.0),
+                    ))
+                    total_words += 1
+            segments.append(TranscriptSegment(
+                start=segment.start, end=segment.end, text=segment.text.strip(),
+                no_speech_prob=getattr(segment, 'no_speech_prob', 0.0),
+                compression_ratio=getattr(segment, 'compression_ratio', 0.0),
+                avg_logprob=getattr(segment, 'avg_logprob', 0.0),
+                words=word_list,
+            ))
+        return segments, hallucinated_count, total_words
+
+    def _transcribe_sequential(
         self,
-        audio_path: str,
+        audio_input,
         language: str,
         vad_filter: bool,
         vad_params: dict,
@@ -352,7 +526,7 @@ class BodyCamTranscriber:
         self._check_cancelled()
 
         segments_raw, info = model.transcribe(
-            audio_path,
+            audio_input,
             language=language,
             vad_filter=vad_filter,
             vad_parameters=vad_params,
@@ -366,40 +540,56 @@ class BodyCamTranscriber:
             logprob_threshold=_HALLUCINATION_AVG_LOGPROB_MIN,
         )
 
-        segments = []
-        hallucinated_count = 0
-        for segment in segments_raw:
-            self._check_cancelled()
-            if _is_hallucinated_segment(segment):
-                hallucinated_count += 1
-                continue
-            word_list = []
-            word_timestamps_raw = getattr(segment, 'words', None)
-            if word_timestamps_raw:
-                for w in word_timestamps_raw:
-                    word_list.append(WordTimestamp(
-                        word=w.word,
-                        start=w.start,
-                        end=w.end,
-                        probability=getattr(w, 'probability', 0.0),
-                    ))
-            segments.append(TranscriptSegment(
-                start=segment.start,
-                end=segment.end,
-                text=segment.text.strip(),
-                no_speech_prob=getattr(segment, 'no_speech_prob', 0.0),
-                compression_ratio=getattr(segment, 'compression_ratio', 0.0),
-                avg_logprob=getattr(segment, 'avg_logprob', 0.0),
-                words=word_list,
-            ))
+        segments, hallucinated_count, total_words = self._segments_from_raw(segments_raw)
+        self._assign_confidence_tiers(segments)
 
         if hallucinated_count > 0:
             logger.info("Chunk %d: filtered %d hallucinated segments", chunk_index, hallucinated_count)
-
         if progress_callback and total_chunks > 1:
             progress_callback(chunk_index + 1, total_chunks)
+        return segments, info
+
+    def _transcribe_batched(
+        self,
+        audio: np.ndarray,
+        language: str,
+        enriched_prompt: str,
+        progress_callback: Optional[Callable[[int, int], None]],
+    ):
+        model = self.load_model()
+        self._check_cancelled()
+
+        if self._batched_pipeline is None:
+            raise RuntimeError("BatchedInferencePipeline not initialized")
+
+        segments_raw, info = self._batched_pipeline.transcribe(
+            audio,
+            batch_size=self.batch_size,
+            beam_size=self.beam_size,
+            language=language,
+            initial_prompt=enriched_prompt,
+            word_timestamps=WHISPER_WORD_TIMESTAMPS,
+            no_speech_threshold=_HALLUCINATION_NO_SPEECH_PROB_MAX,
+            compression_ratio_threshold=_HALLUCINATION_COMPRESSION_RATIO_MAX,
+            logprob_threshold=_HALLUCINATION_AVG_LOGPROB_MIN,
+        )
+
+        segments, hallucinated_count, total_words = self._segments_from_raw(segments_raw)
+        self._assign_confidence_tiers(segments)
+
+        if hallucinated_count > 0:
+            logger.info("Filtered %d hallucinated segments", hallucinated_count)
+        logger.info("Batched transcription: %d segments (%d words)", len(segments), total_words)
+
+        if progress_callback:
+            progress_callback(1, 1)
 
         return segments, info
+
+    @staticmethod
+    def _assign_confidence_tiers(segments: List[TranscriptSegment]):
+        for seg in segments:
+            seg.confidence_tier = _classify_confidence_tier(seg.confidence)
 
     def transcribe_file(
         self,
@@ -410,7 +600,7 @@ class BodyCamTranscriber:
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[TranscriptSegment]:
         self.reset_cancel()
-        model = self.load_model()
+        self.load_model()
 
         if any(file_path.lower().endswith(ext) for ext in VIDEO_EXTENSIONS):
             extracted = extract_audio_from_video(file_path)
@@ -426,60 +616,62 @@ class BodyCamTranscriber:
 
         preprocessor = AudioPreprocessor()
         processed_path = preprocessor.preprocess(file_path)
-
         enriched_prompt = self._build_initial_prompt(file_path, initial_prompt)
 
-        duration = _get_audio_duration(processed_path)
-        needs_chunking = duration > _MAX_CHUNK_DURATION_SECONDS
-
         try:
-            vad_params = dict(
-                threshold=WHISPER_VAD_THRESHOLD,
-                min_speech_duration_ms=WHISPER_VAD_MIN_SPEECH_MS,
-                min_silence_duration_ms=WHISPER_VAD_MIN_SILENCE_MS,
-                speech_pad_ms=WHISPER_VAD_SPEECH_PAD_MS,
+            use_batched = (
+                self.use_batched
+                and self._batched_pipeline is not None
+                and not vad_filter
             )
 
-            if needs_chunking:
-                chunks = _split_audio_chunks(processed_path)
-                all_segments = []
-                total_chunks = len(chunks)
-                cumulative_end = 0.0
-                for i, chunk_path in enumerate(chunks):
-                    logger.info("Transcribing chunk %d/%d", i + 1, total_chunks)
-                    chunk_segments, info = self._transcribe_single(
-                        chunk_path, language, vad_filter, vad_params,
-                        enriched_prompt, progress_callback, i, total_chunks,
-                    )
-                    for seg in chunk_segments:
-                        seg.start += cumulative_end
-                        seg.end += cumulative_end
-                    all_segments.extend(chunk_segments)
-                    cumulative_end = all_segments[-1].end if all_segments else cumulative_end
-                    if chunk_path != processed_path and os.path.exists(chunk_path):
-                        try:
-                            os.remove(chunk_path)
-                        except Exception:
-                            pass
-                segments = all_segments
+            if use_batched:
+                import librosa
+                import soundfile as sf
+                audio_y, audio_sr = librosa.load(processed_path, sr=16000, mono=True)
+                segments, info = self._transcribe_batched(
+                    audio_y, language, enriched_prompt, progress_callback,
+                )
             else:
-                segments, info = self._transcribe_single(
+                vad_params = dict(
+                    threshold=WHISPER_VAD_THRESHOLD,
+                    min_speech_duration_ms=WHISPER_VAD_MIN_SPEECH_MS,
+                    min_silence_duration_ms=WHISPER_VAD_MIN_SILENCE_MS,
+                    speech_pad_ms=WHISPER_VAD_SPEECH_PAD_MS,
+                )
+                segments, info = self._transcribe_sequential(
                     processed_path, language, vad_filter, vad_params,
                     enriched_prompt, progress_callback, 0, 1,
                 )
 
-            if progress_callback and not needs_chunking:
+            if self.enable_alignment and _has_transformers():
+                try:
+                    import librosa
+                    audio_y, audio_sr = librosa.load(processed_path, sr=16000, mono=True)
+                    segments = _align_words_with_wav2vec2(audio_y, segments)
+                except Exception as e:
+                    logger.warning("Alignment skipped: %s", e)
+
+            if self.enable_diarization and _has_pyannote():
+                try:
+                    segments = _apply_diarization(processed_path, segments)
+                except Exception as e:
+                    logger.warning("Diarization skipped: %s", e)
+
+            if progress_callback:
                 progress_callback(1, 1)
 
             total_words = sum(len(s.words) for s in segments)
             avg_confidence = 0.0
+            low_conf_count = 0
             if segments:
                 avg_confidence = sum(s.confidence for s in segments) / len(segments)
+                low_conf_count = sum(1 for s in segments if s.is_low_confidence)
 
             logger.info(
-                "Transcribed %s: %d segments (%d words), confidence=%.2f",
+                "Transcribed %s: %d segments (%d words), confidence=%.2f, low-conf=%d",
                 os.path.basename(file_path), len(segments), total_words,
-                avg_confidence,
+                avg_confidence, low_conf_count,
             )
             return segments
 
@@ -508,23 +700,33 @@ class BodyCamTranscriber:
     def format_transcript(self, segments: List[TranscriptSegment]) -> str:
         lines = []
         total_confidence = 0.0
+        low_conf_count = 0
         for seg in segments:
             start_ts = self.format_timestamp(seg.start)
             end_ts = self.format_timestamp(seg.end)
             total_confidence += seg.confidence
+            speaker_tag = f"<{seg.speaker}> " if seg.speaker else ""
+            conf_marker = " [?]" if seg.is_low_confidence else ""
+            if seg.is_low_confidence:
+                low_conf_count += 1
 
             if WHISPER_WORD_TIMESTAMPS and seg.words:
                 word_detail = " ".join(w.format() for w in seg.words)
-                lines.append(f"[{start_ts} -> {end_ts}] {seg.text}")
-                lines.append(f"  ⏱ {word_detail}")
+                lines.append(f"[{start_ts} -> {end_ts}] {speaker_tag}{seg.text}{conf_marker}")
+                lines.append(f"  \u23f1 {word_detail}")
             else:
-                lines.append(f"[{start_ts} -> {end_ts}] {seg.text}")
+                lines.append(f"[{start_ts} -> {end_ts}] {speaker_tag}{seg.text}{conf_marker}")
 
         if segments:
             avg_conf = total_confidence / len(segments)
             total_secs = segments[-1].end - segments[0].start if segments else 0
             lines.append("")
-            lines.append(f"[METADATA] segments={len(segments)} duration={total_secs:.0f}s confidence={avg_conf:.2f}")
+            lines.append(
+                f"[METADATA] segments={len(segments)} "
+                f"duration={total_secs:.0f}s "
+                f"confidence={avg_conf:.2f} "
+                f"low_confidence={low_conf_count}"
+            )
 
         result = "\n".join(lines)
 
@@ -551,16 +753,20 @@ class BodyCamTranscriber:
         return self.format_transcript(segments)
 
 
+# ---------------------------------------------------------------------------
+# Module-level API
+# ---------------------------------------------------------------------------
+
 transcriber_instance = None
 _transcriber_lock = threading.Lock()
 
 
-def get_transcriber() -> BodyCamTranscriber:
+def get_transcriber(**kwargs) -> BodyCamTranscriber:
     global transcriber_instance
     if transcriber_instance is None:
         with _transcriber_lock:
             if transcriber_instance is None:
-                transcriber_instance = BodyCamTranscriber()
+                transcriber_instance = BodyCamTranscriber(**kwargs)
     return transcriber_instance
 
 
@@ -590,6 +796,7 @@ def cleanup_transcriber():
         if model is not None:
             del model
         transcriber_instance.model = None
+        transcriber_instance._batched_pipeline = None
         transcriber_instance.clear_vram()
         if torch.cuda.is_available():
             torch.cuda.synchronize()
