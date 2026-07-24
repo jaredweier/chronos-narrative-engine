@@ -34,12 +34,12 @@ export default function InteractiveRedactPage() {
   const [currentTime, setCurrentTime] = useState(0);
 
   const token = typeof window !== 'undefined' ? localStorage.getItem("chronos_token") : "";
-  const videoUrl = `http://localhost:8765/api/v1/evidence/${incidentId}/${videoFilename}?token=${token}`;
+  const videoUrl = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/evidence/${incidentId}/${videoFilename}?token=${token}`;
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await fetch(`http://localhost:8765/api/v1/video/${incidentId}/detections?video_filename=${encodeURIComponent(videoFilename)}`, {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/video/${incidentId}/detections?video_filename=${encodeURIComponent(videoFilename)}`, {
           headers: { "Authorization": `Bearer ${token}` }
         });
         if (res.ok) {

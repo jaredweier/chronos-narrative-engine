@@ -47,7 +47,7 @@ export default function ReviewQueuePage() {
     
     try {
       const token = localStorage.getItem("chronos_token") || "";
-      const res = await fetch("http://localhost:8765/api/v1/verify-statute", {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/verify-statute`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`,

@@ -33,7 +33,7 @@ export default function DocumentRedactorPage() {
       const token = localStorage.getItem("chronos_token") || "";
       
       try {
-        const res = await fetch("http://localhost:8765/api/v1/redact/analyze", {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/redact/analyze`, {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${token}`
@@ -81,7 +81,7 @@ export default function DocumentRedactorPage() {
     const token = localStorage.getItem("chronos_token") || "";
 
     try {
-      const res = await fetch("http://localhost:8765/api/v1/redact/apply", {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/redact/apply`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`,

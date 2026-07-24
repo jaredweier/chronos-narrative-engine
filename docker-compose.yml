@@ -105,17 +105,16 @@ services:
               count: 1
               capabilities: [gpu]
 
-  chronos:
+  api_server:
     build: .
-    command: wait-for-it postgres:5432 -- streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    command: wait-for-it postgres:5432 -- uvicorn api_server:app --host 0.0.0.0 --port 8000
     ports:
-      - "8501:8501"
+      - "8000:8000"
     environment:
       - CHRONOS_OLLAMA_URL=http://ollama:11434
       - CHRONOS_DB_URL=postgresql://chronos_user:chronos_password@postgres:5432/chronos_db
       - CHRONOS_REDIS_URL=redis://redis:6379/0
       - CHRONOS_AUTH_MODE=local
-      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4096
     volumes:
       - chronos_data:/data
     depends_on:
@@ -125,6 +124,19 @@ services:
         condition: service_started
       ollama:
         condition: service_started
+
+  frontend:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - api_server
 
 volumes:
   ollama_data:

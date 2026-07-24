@@ -33,7 +33,7 @@ export default function AIAuditTrailPage() {
 
     try {
       const token = localStorage.getItem("chronos_token") || "";
-      const res = await fetch(`http://localhost:8765/api/v1/audit/diff/${incidentId.trim()}`, {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/audit/diff/${incidentId.trim()}`, {
         headers: {
           "Authorization": `Bearer ${token}`
         }

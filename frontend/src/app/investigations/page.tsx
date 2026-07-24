@@ -27,7 +27,7 @@ export default function InvestigationsPage() {
 
     try {
       const token = localStorage.getItem("chronos_token") || "";
-      const res = await fetch("http://localhost:8765/api/v1/case-briefs", {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/case-briefs`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`,
