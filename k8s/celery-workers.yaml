@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker-vision
+  labels:
+    app: chronos
+    tier: worker
+    role: vision
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chronos
+      tier: worker
+      role: vision
+  template:
+    metadata:
+      labels:
+        app: chronos
+        tier: worker
+        role: vision
+    spec:
+      # Segment to GPU instances in GovCloud
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+      containers:
+      - name: celery-vision
+        image: your-registry/chronos-worker:latest
+        command: ["celery", "-A", "celery_app", "worker", "-Q", "vision", "--loglevel=info", "-c", "1"]
+        envFrom:
+        - secretRef:
+            name: chronos-secrets
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "16Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-worker-audio
+  labels:
+    app: chronos
+    tier: worker
+    role: audio
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chronos
+      tier: worker
+      role: audio
+  template:
+    metadata:
+      labels:
+        app: chronos
+        tier: worker
+        role: audio
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-tesla-t4
+      containers:
+      - name: celery-audio
+        image: your-registry/chronos-worker:latest
+        command: ["celery", "-A", "celery_app", "worker", "-Q", "audio", "--loglevel=info", "-c", "1"]
+        envFrom:
+        - secretRef:
+            name: chronos-secrets
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "16Gi"

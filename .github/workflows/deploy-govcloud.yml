@@ -1,0 +1,58 @@
+name: Deploy to GovCloud Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: your-gcp-govcloud-project
+  GKE_CLUSTER: chronos-cluster
+  GKE_ZONE: us-east4-a
+  REGISTRY: us-east4-docker.pkg.dev
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy to GKE
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    # In a real environment, you'd use Workload Identity Federation
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v1
+
+    - name: Configure Docker for Artifact Registry
+      run: gcloud auth configure-docker $REGISTRY
+
+    - name: Build and Push API Server
+      run: |
+        docker build -t $REGISTRY/$PROJECT_ID/chronos/api-server:${{ github.sha }} .
+        docker push $REGISTRY/$PROJECT_ID/chronos/api-server:${{ github.sha }}
+
+    - name: Build and Push Celery Worker
+      run: |
+        docker build -t $REGISTRY/$PROJECT_ID/chronos/worker:${{ github.sha }} .
+        docker push $REGISTRY/$PROJECT_ID/chronos/worker:${{ github.sha }}
+
+    - name: Build and Push Frontend
+      run: |
+        cd frontend
+        docker build -t $REGISTRY/$PROJECT_ID/chronos/frontend:${{ github.sha }} .
+        docker push $REGISTRY/$PROJECT_ID/chronos/frontend:${{ github.sha }}
+
+    - name: Connect to GKE Cluster
+      run: gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE --project $PROJECT_ID
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Substitute image tags using kustomize or sed
+        # For this template, we apply directly:
+        kubectl apply -f k8s/

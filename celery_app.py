@@ -17,6 +17,7 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    worker_max_tasks_per_child=1,
     task_routes={
         'tasks.transcribe_video_task': {'queue': 'audio'},
         'tasks.process_vision_task': {'queue': 'vision'},

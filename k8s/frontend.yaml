@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app: chronos
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chronos
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: chronos
+        tier: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: your-registry/chronos-frontend:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "https://api.chronos.gov"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: chronos
+    tier: frontend
+  ports:
+  - port: 80
+    targetPort: 3000
