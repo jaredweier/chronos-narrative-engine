@@ -3,6 +3,117 @@ import re
 from typing import List, Dict, Optional
 
 
+NIBRS_WI_MAP = {
+    "09A": ["940.01", "940.02", "940.03", "940.05"],
+    "09B": ["940.06"],
+    "09C": ["940.19(1)", "940.19(2)", "940.20"],
+    "09D": ["940.225(4)"],
+    "09E": ["940.19(1m)", "940.20"],
+    "10A": ["940.19(1)", "940.19(2)"],
+    "11A": ["943.10(1m)", "943.10(2)"],
+    "11B": ["943.10(1)", "943.10(2)"],
+    "11C": ["943.10(1m)"],
+    "11D": ["943.10(1)"],
+    "12A": ["943.20"],
+    "12B": ["943.20(3)(a)"],
+    "12C": ["943.20(3)(b)"],
+    "12D": ["943.23"],
+    "13A": ["940.225(1)", "940.225(2)", "940.225(3)"],
+    "13B": ["940.225(2m)", "940.225(3)"],
+    "13C": ["940.22(2)", "940.225(4)"],
+    "20A": ["943.21"],
+    "20B": ["943.22", "943.23"],
+    "23A": ["940.01", "940.02", "940.03", "940.05", "940.06"],
+    "23B": ["940.19(1)", "940.19(2)", "940.20"],
+    "23C": ["941.20"],
+    "23D": ["940.30"],
+    "23E": ["940.225(1)", "940.225(2)", "940.225(3)"],
+    "23F": ["948.02", "948.025"],
+    "23G": ["943.10", "943.20"],
+    "23H": ["940.19(1)"],
+    "24A": ["941.01"],
+    "24B": ["943.20(3)(a)", "943.20(3)(b)"],
+    "26A": ["945.01", "945.02"],
+    "26B": ["945.03", "945.04"],
+    "27A": ["948.02(1)", "948.02(2)", "948.025"],
+    "27B": ["948.03", "948.04"],
+    "27C": ["948.05", "948.06", "948.07"],
+    "27D": ["948.08", "948.085"],
+    "35A": ["946.41"],
+    "36A": ["947.01"],
+    "39A": ["943.01(1)", "943.01(2)"],
+    "39B": ["943.01(3)"],
+    "39C": ["943.02"],
+    "39D": ["943.03"],
+    "40A": ["948.21"],
+    "40B": ["940.291"],
+    "50A": ["341.04", "343.05"],
+    "90A": ["346.63(1)", "346.63(2)", "940.09", "940.25"],
+    "90B": ["346.63(1)", "346.63(2)"],
+    "90C": ["346.63(1)", "346.63(2)", "940.25"],
+    "90D": ["30.681", "350.101"],
+    "120A": ["943.31"],
+    "120B": ["943.34"],
+}
+
+
+def statutes_for_nibrs(nibrs_code: str) -> List[Dict]:
+    statute_codes = NIBRS_WI_MAP.get(nibrs_code, [])
+    results = []
+    seen = set()
+    for code in statute_codes:
+        if code not in seen:
+            seen.add(code)
+            statute = get_statute(code)
+            if statute:
+                results.append(statute)
+            else:
+                results.append({"code": code, "title": f"Wis. Stat. § {code}", "category": "Unknown", "description": ""})
+    return results
+
+
+def nibrs_for_statute(statute_code: str) -> List[str]:
+    results = []
+    for nibrs_code, statute_codes in NIBRS_WI_MAP.items():
+        if any(sc in statute_code or statute_code in sc for sc in statute_codes):
+            results.append(nibrs_code)
+    return results
+
+
+def import_statutes_from_json(filepath: str) -> Tuple[int, int]:
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("JSON must be an array of statute objects")
+    imported = 0
+    for item in data:
+        if not isinstance(item, dict) or "code" not in item or "title" not in item:
+            continue
+        WI_CRIMINAL_STATUTES.append(item)
+        imported += 1
+    return imported, len(WI_CRIMINAL_STATUTES)
+
+
+def import_jury_instructions_from_json(filepath: str) -> Tuple[int, int]:
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise ValueError("JSON must be an array of jury instruction objects")
+    imported = 0
+    for item in data:
+        if not isinstance(item, dict) or "code" not in item or "title" not in item:
+            continue
+        WI_JURY_INSTRUCTIONS.append(item)
+        imported += 1
+    return imported, len(WI_JURY_INSTRUCTIONS)
+
+
+def export_statutes_to_json(filepath: str) -> int:
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(WI_CRIMINAL_STATUTES, f, indent=2)
+    return len(WI_CRIMINAL_STATUTES)
+
+
 WI_CRIMINAL_STATUTES = [
     {"code": "940.01", "title": "First-Degree Intentional Homicide", "category": "Homicide", "description": "Whoever causes the death of another human being with intent to kill that person or another"},
     {"code": "940.02", "title": "First-Degree Reckless Homicide", "category": "Homicide", "description": "Causes the death of another human being by recklessly engaging in conduct which creates an unreasonable and substantial risk of death"},
@@ -343,6 +454,28 @@ WI_TITLE_CHAPTER_MAP = {
     "350": "Snowmobiles and ATVs (Ch. 350)",
     "351": "Motor Vehicle Theft (Ch. 351)",
 }
+
+
+def find_statutes_in_text(text: str) -> List[Dict]:
+    if not text:
+        return []
+    pattern = re.compile(r'(?:§\s*)?(\d{2,3}\.\d{2,3}(?:\([^)]+\))?)')
+    results = []
+    seen = set()
+    for m in pattern.finditer(text):
+        code = m.group(1)
+        if code in seen:
+            continue
+        seen.add(code)
+        statute = get_statute(code)
+        if statute:
+            results.append({
+                "code": statute["code"],
+                "title": statute["title"],
+                "start": m.start(),
+                "end": m.end(),
+            })
+    return results
 
 
 def search_statutes(query: str, limit: int = 10) -> List[Dict]:

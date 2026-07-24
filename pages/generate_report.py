@@ -1,4 +1,7 @@
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+from celery.result import AsyncResult
+from state_manager import StateManager
 import os
 import tempfile
 from datetime import datetime
@@ -26,6 +29,8 @@ from pipeline_manager import submit_pdf_and_transcribe
 from database import log_submission, add_evidence_event, get_evidence_chain
 from export import export_report_docx, export_report_pdf
 from ui import (
+    inject_button_animations,
+    render_animated_evidence_card,
     _case_bar_html, render_department_header,
     _load_custom_categories,
 )
@@ -76,34 +81,59 @@ def _render_evidence_upload():
             st.success(f"Body cam loaded: {video_file.name} ({video_file.size / 1024 / 1024:.0f}MB)")
             st.video(save_path)
 
-    render_draft_banner(st.session_state['authenticated_officer'])
+    render_draft_banner(StateManager.get_authenticated_officer())
 
     if st.session_state.get('pdf_path') or st.session_state.get('video_path'):
-        if st.button("Process Evidence", type="primary", use_container_width=True, key="process_btn"):
-            cad_result, transcript_result = None, None
+        active_tasks = st.session_state.get('active_tasks', {})
+        if active_tasks:
+            # Poll every 2 seconds
+            st_autorefresh(interval=2000, limit=100, key="task_poller")
+            st.info("Processing evidence in background...")
+            
+            all_done = True
+            cad_result = st.session_state.get('cad_data')
+            transcript_result = st.session_state.get('transcript')
+            
+            if 'pdf' in active_tasks:
+                res = AsyncResult(active_tasks['pdf'])
+                if res.ready():
+                    if res.successful():
+                        cad_result = res.result
+                        st.session_state['cad_data'] = cad_result
+                    else:
+                        st.error(f"PDF parsing failed: {res.result}")
+                    del active_tasks['pdf']
+                else:
+                    st.write("CAD PDF Status:", res.status)
+                    all_done = False
+                    
+            if 'video' in active_tasks:
+                res = AsyncResult(active_tasks['video'])
+                if res.ready():
+                    from spell_check import auto_correct_transcript
+                    if res.successful():
+                        transcript_result = res.result
+                        if transcript_result:
+                            transcript_result = auto_correct_transcript(transcript_result)
+                        st.session_state['transcript'] = transcript_result
+                    else:
+                        st.error(f"Transcription failed: {res.result}")
+                    del active_tasks['video']
+                else:
+                    st.write("Transcription Status:", res.status)
+                    all_done = False
+                    
+            st.session_state['active_tasks'] = active_tasks
+            if all_done:
+                st.success("Evidence processed")
+                st.session_state['active_tasks'] = {}
+                st.rerun()
+                
+        elif st.button("Process Evidence", type="primary", use_container_width=True, key="process_btn"):
             pdf = st.session_state.get('pdf_path')
             video = st.session_state.get('video_path')
-            if pdf and video:
-                with st.spinner("Processing CAD PDF and transcribing bodycam footage..."):
-                    cad_result, transcript_result = submit_pdf_and_transcribe(pdf, video)
-            elif pdf:
-                with st.spinner("Parsing CAD PDF..."):
-                    cad_result = parse_zuercher_pdf(pdf)
-            elif video:
-                from config import WHISPER_INITIAL_PROMPT
-                trans_prog = st.progress(0, text="Extracting and transcribing audio...")
-                def _on_progress(current, total):
-                    trans_prog.progress(current / total, text=f"Transcribing chunk {current}/{total}")
-                transcript_result = transcribe_bodycam(video, initial_prompt=WHISPER_INITIAL_PROMPT, progress_callback=_on_progress)
-                trans_prog.empty()
-                from spell_check import auto_correct_transcript
-                if transcript_result:
-                    transcript_result = auto_correct_transcript(transcript_result)
-            if cad_result is not None:
-                st.session_state['cad_data'] = cad_result
-            if transcript_result is not None:
-                st.session_state['transcript'] = transcript_result
-            st.success("Evidence processed")
+            tasks = submit_pdf_and_transcribe(pdf, video)
+            st.session_state['active_tasks'] = tasks
             st.rerun()
 
 
@@ -154,7 +184,7 @@ def _render_notes_and_category():
 
 
 def _render_phrase_book():
-    officer = st.session_state['authenticated_officer']
+    officer = StateManager.get_authenticated_officer()
     st.markdown("<div class='card-header' style='margin-top:16px;'>Phrase Book</div>", unsafe_allow_html=True)
     pb_cats = get_phrase_categories(officer)
     if pb_cats:
@@ -181,7 +211,7 @@ def _render_phrase_book():
         if similar_data:
             st.markdown(f"<div style='font-size:0.65rem;opacity:0.4;'>Loaded: {similar_data['document_type']} by {similar_data['officer_name']}</div>", unsafe_allow_html=True)
             if st.button("Apply Template from Case", key="apply_similar_btn", use_container_width=True):
-                template = apply_similar_case_template(similar_data['report_text'], st.session_state['authenticated_officer'])
+                template = apply_similar_case_template(similar_data['report_text'], StateManager.get_authenticated_officer())
                 if template:
                     current = st.session_state.get('custom_notes_input', '')
                     st.session_state['custom_notes_input'] = (current + "\n\n[FROM CASE " + similar_id + "]\n" + template) if current else "[FROM CASE " + similar_id + "]\n" + template
@@ -204,7 +234,7 @@ def _render_phrase_book():
 def _render_evidence_chain():
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     with st.expander(f"{chr(0x1F4E6)} Evidence Chain-of-Custody", expanded=False):
-        case_id = st.session_state.get('case_number', '')
+        case_id = StateManager.get_case_number()
         if case_id:
             chain = get_evidence_chain(case_id)
             if chain:
@@ -229,7 +259,7 @@ def _render_evidence_chain():
                 ev_action = st.selectbox("Action", ["Collected", "Transferred", "Analyzed", "Stored", "Viewed", "Reviewed", "Exported", "Destroyed"], key="ev_action")
             with ec2:
                 ev_desc = st.text_input("Description", key="ev_desc", placeholder="e.g. Bodycam #2 - Officer Wilson")
-                ev_actor = st.text_input("Handled By", key="ev_actor", value=st.session_state.get('authenticated_officer', ''))
+                ev_actor = st.text_input("Handled By", key="ev_actor", value=StateManager.get_authenticated_officer())
                 ev_notes = st.text_input("Notes", key="ev_notes", placeholder="Optional notes")
             if st.button("Log Event", key="log_ev_btn", use_container_width=True):
                 if ev_id and ev_desc and ev_action:
@@ -241,17 +271,18 @@ def _render_evidence_chain():
 
 
 def _render_cad_data():
-    if not st.session_state.get('cad_data'):
+    cad_list = StateManager.get_cad_data_list()
+    if not cad_list:
         return
     st.markdown("<div class='card-header'>Extracted CAD Data</div>", unsafe_allow_html=True)
-    cad = st.session_state['cad_data']
-    cad_df = {'Field': ['Call ID', 'Type', 'Location', 'Dispatch', 'Arrival', 'Cleared'], 'Value': [cad.call_id, cad.call_type, cad.location, cad.dispatch_time, cad.arrival_time, cad.clear_time]}
-    st.data_editor(cad_df, use_container_width=True, hide_index=True, disabled=True)
-    if cad.involved_parties:
-        for party in cad.involved_parties:
-            st.markdown(f"<div class='card-highlight'><strong>{h(sanitize_pii_content(party.name))}</strong> &mdash; DOB {h(sanitize_pii_content(party.dob))} &bull; {h(party.sex)} &bull; Age {h(str(party.age))}</div>", unsafe_allow_html=True)
-    if any('?' in str(v) or '!' in str(v) for v in [cad.call_id, cad.call_type, cad.location]):
-        st.warning("Low-confidence OCR detected \u2014 verify fields before submission")
+    for cad in cad_list:
+        details = f"{h(cad.call_type)} at {h(cad.location)}"
+        render_animated_evidence_card(f"CAD {h(cad.call_id)}", details, icon="🚓", color_theme="blue")
+        if cad.involved_parties:
+            for party in cad.involved_parties:
+                st.markdown(f"<div class='card-highlight' style='margin-left: 20px;'><strong>{h(sanitize_pii_content(party.name))}</strong> &mdash; DOB {h(sanitize_pii_content(party.dob))} &bull; {h(party.sex)} &bull; Age {h(str(party.age))}</div>", unsafe_allow_html=True)
+        if any('?' in str(v) or '!' in str(v) for v in [cad.call_id, cad.call_type, cad.location]):
+            st.warning("Low-confidence OCR detected \u2014 verify fields before submission")
 
 
 def _render_compliance_results():
@@ -271,11 +302,11 @@ def _render_compliance_results():
         if cad and cad.involved_parties:
             parties = [{"name": p.name, "dob": p.dob, "sex": p.sex, "age": p.age} for p in cad.involved_parties]
         nibrs_xml = build_nibrs_xml(
-            incident_id=st.session_state.get('case_number', ''),
-            officer_name=st.session_state.get('authenticated_officer', ''),
-            officer_id=st.session_state.get('officer_id', ''),
+            incident_id=StateManager.get_case_number(),
+            officer_name=StateManager.get_authenticated_officer(),
+            officer_id=StateManager.get_officer_id(),
             report_type=st.session_state.get('report_type_select', ''),
-            narrative=st.session_state.get('generated_report', ''),
+            narrative=StateManager.get_generated_report(),
             call_id=cad.call_id if cad else '',
             call_type=cad.call_type if cad else '',
             location=cad.location if cad else '',
@@ -361,15 +392,19 @@ def _render_statute_selector(report_type):
 
 def _generate_narrative_flow(report_type, custom_notes, statutes=None):
     cad_text = ""
-    if st.session_state.get('cad_data'):
-        cad = st.session_state['cad_data']
+    cad_list = StateManager.get_cad_data_list()
+    if cad_list:
+        cad = cad_list[0]
         cad_text = f"Call ID: {cad.call_id}\nType: {cad.call_type}\nLocation: {cad.location}\nDispatch: {cad.dispatch_time}\nArrival: {cad.arrival_time}\nCleared: {cad.clear_time}"
         if cad.involved_parties:
             cad_text += "\nInvolved parties: " + "; ".join(f"{p.name} (DOB:{p.dob}, {p.sex}, Age {p.age})" for p in cad.involved_parties)
         if cad.raw_text:
             cad_text += f"\n\nFull CAD text:\n{cad.raw_text}"
 
-    raw_transcript = st.session_state.get('transcript', '')
+    raw_transcript = ""
+    transcripts = StateManager.get_transcripts()
+    if transcripts:
+        raw_transcript = "\n".join(transcripts)
     transcript_text = sanitize_pii_content(auto_correct_transcript(raw_transcript))
     notes = sanitize_pii_content(custom_notes) if custom_notes else ""
 
@@ -377,44 +412,49 @@ def _generate_narrative_flow(report_type, custom_notes, statutes=None):
         st.warning("Provide CAD data, body cam footage, or notes to generate a narrative.")
         return
 
-    with st.spinner("Generating narrative with LLM..."):
-        examples = get_style_examples(st.session_state['authenticated_officer'], report_type)
-        tpl_prompt = st.session_state.get('_template_prompt')
+    examples = get_style_examples(StateManager.get_authenticated_officer(), report_type)
+    tpl_prompt = st.session_state.get('_template_prompt')
 
-        correction_text = ""
-        corrections = get_recent_corrections(st.session_state['authenticated_officer'], report_type, limit=3)
-        if corrections:
-            correction_text = "\n\n--- PREVIOUS CORRECTIONS (learn from these edits) ---\n"
-            for c in corrections[:2]:
-                if c.get('final_approved_report') and c.get('unedited_ai_draft'):
-                    correction_text += f"Original AI draft:\n{c['unedited_ai_draft'][:1000]}\n"
-                    correction_text += f"Officer corrected to:\n{c['final_approved_report'][:1000]}\n---\n"
+    correction_text = ""
+    corrections = get_recent_corrections(StateManager.get_authenticated_officer(), report_type, limit=3)
+    if corrections:
+        correction_text = "\n\n--- PREVIOUS CORRECTIONS (learn from these edits) ---\n"
+        for c in corrections[:2]:
+            if c.get('final_approved_report') and c.get('unedited_ai_draft'):
+                correction_text += f"Original AI draft:\n{c['unedited_ai_draft'][:1000]}\n"
+                correction_text += f"Officer corrected to:\n{c['final_approved_report'][:1000]}\n---\n"
 
-        combined_notes = ""
-        if tpl_prompt:
-            combined_notes += tpl_prompt + "\n\n"
-        combined_notes += notes
-        if correction_text:
-            combined_notes += correction_text
+    combined_notes = ""
+    if tpl_prompt:
+        combined_notes += tpl_prompt + "\n\n"
+    combined_notes += notes
+    if correction_text:
+        combined_notes += correction_text
 
-        statute_objects = None
-        selected_codes = statutes or st.session_state.get('_selected_statute_codes', [])
-        if selected_codes:
-            from wi_statutes import WI_CRIMINAL_STATUTES
-            statute_objects = [s for s in WI_CRIMINAL_STATUTES if s["code"] in selected_codes]
+    statute_objects = None
+    selected_codes = statutes or st.session_state.get('_selected_statute_codes', [])
+    if selected_codes:
+        from wi_statutes import WI_CRIMINAL_STATUTES
+        statute_objects = [s for s in WI_CRIMINAL_STATUTES if s["code"] in selected_codes]
 
-        narrative = generate_narrative(
-            cad_text=cad_text, transcript=transcript_text,
-            officer_style_examples=examples,
-            custom_notes=combined_notes, report_type=report_type,
-            statutes=statute_objects,
-        )
-        if narrative.startswith("[ERROR]"):
-            st.error(f"LLM Error: {narrative}")
-        else:
-            st.session_state['generated_report'] = narrative
-            st.session_state['original_ai_draft'] = narrative
-            save_snapshot(st.session_state['case_number'], st.session_state['authenticated_officer'], narrative, "AI Draft")
+    st.markdown("### Generating Narrative...")
+    
+    from narrative_generator import generate_narrative_stream
+    stream = generate_narrative_stream(
+        cad_text=cad_text, transcript=transcript_text,
+        officer_style_examples=examples,
+        custom_notes=combined_notes, report_type=report_type,
+        statutes=statute_objects,
+    )
+    
+    narrative = st.write_stream(stream)
+    
+    if narrative.startswith("[ERROR]"):
+        st.error(f"LLM Error: {narrative}")
+    else:
+        StateManager.set_generated_report(narrative)
+        StateManager.set_original_ai_draft(narrative)
+        save_snapshot(StateManager.get_case_number(), StateManager.get_authenticated_officer(), narrative, "AI Draft")
 
     if not narrative.startswith("[ERROR]"):
         with st.spinner("Running compliance checks..."):
@@ -424,11 +464,11 @@ def _generate_narrative_flow(report_type, custom_notes, statutes=None):
 
 
 def _render_report_editor_and_export(report_type):
-    if not st.session_state.get('generated_report'):
+    if not StateManager.get_generated_report():
         return
     st.markdown("<div class='card-header'>Generated Narrative</div>", unsafe_allow_html=True)
 
-    report_text = st.session_state.get('generated_report', '')
+    report_text = StateManager.get_generated_report()
 
     spell_col, statute_col = st.columns(2)
     with spell_col:
@@ -440,7 +480,7 @@ def _render_report_editor_and_export(report_type):
                     st.markdown(f"<div style='font-size:0.68rem;'><span style='color:#f87171;text-decoration:line-through;'>{orig}</span> &rarr; <span style='color:#4ade80;'>{corr}</span></div>", unsafe_allow_html=True)
                 if st.button("Auto-Correct All", key="auto_correct_btn"):
                     corrected = auto_correct(report_text)
-                    st.session_state['generated_report'] = corrected
+                    StateManager.set_generated_report(corrected)
                     st.rerun()
             else:
                 st.success("No spelling issues found")
@@ -451,15 +491,15 @@ def _render_report_editor_and_export(report_type):
             if statutes:
                 for s in statutes:
                     if st.button(f"Add {s['code']} - {s['title']}", key=f"sta_{s['code']}", use_container_width=True):
-                        current = st.session_state.get('generated_report', '')
-                        st.session_state['generated_report'] = current + f"\n\nWI Stat. {s['code']} — {s['title']}"
+                        current = StateManager.get_generated_report()
+                        StateManager.set_generated_report(current + f"\n\nWI Stat. {s['code']} — {s['title']}")
                         st.rerun()
             jis = search_jury_instructions(statute_query, limit=3)
             if jis:
                 for ji in jis:
                     if st.button(f"Add {ji['code']} - {ji['title']}", key=f"ji_{ji['code']}", use_container_width=True):
-                        current = st.session_state.get('generated_report', '')
-                        st.session_state['generated_report'] = current + f"\n\n{ji['code']} — {ji['title']}"
+                        current = StateManager.get_generated_report()
+                        StateManager.set_generated_report(current + f"\n\n{ji['code']} — {ji['title']}")
                         st.rerun()
 
     nibrs_code = st.session_state.get('_selected_nibrs_code', "")
@@ -478,22 +518,22 @@ def _render_report_editor_and_export(report_type):
         if nibrs_code:
             desc = lookup_nibrs_code(nibrs_code)
             if st.button(f"Add to report: [{nibrs_code}] {desc}", key="add_nibrs_btn", use_container_width=True):
-                current = st.session_state.get('generated_report', '')
-                st.session_state['generated_report'] = current + f"\n\nNIBRS Code: {nibrs_code} — {desc}"
+                current = StateManager.get_generated_report()
+                StateManager.set_generated_report(current + f"\n\nNIBRS Code: {nibrs_code} — {desc}")
 
-    st.session_state['generated_report'] = st.text_area(
-        "Report", value=st.session_state['generated_report'],
+    StateManager.set_generated_report(st.text_area(
+        "Report", value=StateManager.get_generated_report(),
         height=400, key="report_editor", label_visibility="collapsed",
-    )
-    report_text = st.session_state.get('generated_report', '')
-    if report_text and st.session_state.get('original_ai_draft') and report_text != st.session_state.get('original_ai_draft'):
-        save_draft(st.session_state['authenticated_officer'], report_text)
+    ))
+    report_text = StateManager.get_generated_report()
+    if report_text and StateManager.get_original_ai_draft() and report_text != StateManager.get_original_ai_draft():
+        save_draft(StateManager.get_authenticated_officer(), report_text)
 
     st.markdown("<div class='export-panel'><div class='export-label'>Export Options</div></div>", unsafe_allow_html=True)
-    officer_name = st.session_state['authenticated_officer']
-    badge_num = st.session_state['officer_id']
-    case_no = st.session_state.get('case_number', 'INC-UNKNOWN')
-    rpt_text = st.session_state['generated_report']
+    officer_name = StateManager.get_authenticated_officer()
+    badge_num = StateManager.get_officer_id()
+    case_no = StateManager.get_case_number() or 'INC-UNKNOWN'
+    rpt_text = StateManager.get_generated_report()
     docx_data = export_report_docx(rpt_text, officer_name, badge_num, case_no)
     pdf_data = export_report_pdf(rpt_text, officer_name, badge_num, case_no)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -521,15 +561,15 @@ def _render_report_editor_and_export(report_type):
     if st.button("Submit to Audit Trail", type="primary", use_container_width=True, key="submit_audit", disabled=not verified):
         log_submission(
             incident_id=st.session_state.get('case_number', 'UNKNOWN'),
-            officer_name=st.session_state['authenticated_officer'],
-            officer_id=st.session_state.get('officer_id', ''),
+            officer_name=StateManager.get_authenticated_officer(),
+            officer_id=StateManager.get_officer_id(),
             document_type=report_type,
-            ai_draft=st.session_state.get('original_ai_draft', ''),
-            final_report=st.session_state['generated_report'],
-            was_modified=(st.session_state['generated_report'] != st.session_state.get('original_ai_draft', '')),
+            ai_draft=StateManager.get_original_ai_draft(),
+            final_report=StateManager.get_generated_report(),
+            was_modified=(StateManager.get_generated_report() != StateManager.get_original_ai_draft()),
             verified=verified,
         )
-        save_snapshot(st.session_state['case_number'], st.session_state['authenticated_officer'], st.session_state['generated_report'], "Final Submitted")
+        save_snapshot(StateManager.get_case_number(), StateManager.get_authenticated_officer(), StateManager.get_generated_report(), "Final Submitted")
         st.success("Report submitted to audit trail")
 
 
@@ -539,9 +579,9 @@ def render():
 
         case_col, ts_col = st.columns([3, 1])
         with case_col:
-            case_val = st.text_input("Case Number", value=st.session_state.get('case_number', ''), key="case_number_input", placeholder="e.g. INC-20260711-143022", label_visibility="collapsed")
+            case_val = st.text_input("Case Number", value=StateManager.get_case_number(), key="case_number_input", placeholder="e.g. INC-20260711-143022", label_visibility="collapsed")
             if case_val:
-                st.session_state['case_number'] = case_val
+                StateManager.set_case_number(case_val)
         with ts_col:
             st.markdown(f"<div style='font-size:0.7rem;color:#64748b;font-family:monospace;padding-top:6px;text-align:right;'>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>", unsafe_allow_html=True)
 
@@ -569,7 +609,7 @@ def render():
             _render_compliance_results()
             _render_report_editor_and_export(report_type)
 
-            if not st.session_state.get('generated_report') and not st.session_state.get('cad_data'):
+            if not StateManager.get_generated_report() and not st.session_state.get('cad_data'):
                 st.markdown("""<div class="empty-state"><div class="icon">&#128203;</div>
                 <div class="title">No Report Generated Yet</div>
                 <div class="desc">Upload evidence and click Generate Narrative, or enter notes directly on the left</div>

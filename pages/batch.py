@@ -1,9 +1,15 @@
+import os
+import tempfile
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+from celery.result import AsyncResult
 from html import escape as h
 from batch_queue import get_queue, add_to_queue, remove_from_queue, clear_queue, update_item, queue_stats
 from narrative_generator import generate_narrative
 from nibrs_checker import check_nibrs_compliance, format_compliance_report
 from nibrs_export import export_nibrs_xml
+from pdf_parser import parse_zuercher_pdf
+from transcriber import transcribe_bodycam
 from ui import render_department_header
 from logger import get_logger
 
@@ -38,8 +44,18 @@ def render():
             location = st.text_input("Location", placeholder="Incident address", key="bq_loc")
             report_type = st.selectbox("Report Type", ["Standard Incident Report", "Search Warrant Affidavit", "Internal Use-of-Force Review", "OWI / DUI Report"], key="bq_rpt_type")
             notes = st.text_area("Notes", height=100, key="bq_notes", placeholder="Incident notes or description...", label_visibility="collapsed")
+            evidence_file = st.file_uploader(
+                "Evidence File (optional)", type=['pdf', 'mp4', 'mov', 'avi', 'mkv', 'wav', 'mp3'],
+                key="bq_evidence", label_visibility="collapsed",
+            )
 
             if st.button("Add to Queue", type="primary", use_container_width=True, key="bq_add"):
+                ev_path = ""
+                if evidence_file:
+                    os.makedirs("temp_evidence", exist_ok=True)
+                    ev_path = os.path.join("temp_evidence", evidence_file.name)
+                    with open(ev_path, 'wb') as f:
+                        f.write(evidence_file.read())
                 add_to_queue({
                     "case_number": case_no,
                     "call_id": call_id,
@@ -47,6 +63,8 @@ def render():
                     "location": location,
                     "report_type": report_type,
                     "notes": notes,
+                    "evidence_file_path": ev_path,
+                    "evidence_file_name": evidence_file.name if evidence_file else "",
                     "officer_name": st.session_state.get('authenticated_officer', ''),
                     "officer_id": st.session_state.get('officer_id', ''),
                 })
@@ -73,22 +91,54 @@ def render():
                         if item.get('error'):
                             st.warning(item['error'][:120])
 
+
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     if queue and st.button("Process All", type="primary", use_container_width=True, key="bq_process"):
+                        from tasks import process_batch_item_task
                         for i, item in enumerate(queue):
                             if item.get('status') == 'queued':
-                                update_item(i, {"status": "processing"})
-                                try:
-                                    narrative = generate_narrative(
-                                        cad_text=f"Call ID: {item.get('call_id', '')}\nType: {item.get('call_type', '')}\nLocation: {item.get('location', '')}",
-                                        custom_notes=item.get('notes', ''),
-                                        report_type=item.get('report_type', 'Standard Incident Report'),
-                                    )
-                                    update_item(i, {"status": "done" if not narrative.startswith("[ERROR]") else "error", "narrative": narrative, "error": narrative if narrative.startswith("[ERROR]") else ""})
-                                except Exception as e:
-                                    update_item(i, {"status": "error", "error": str(e)})
+                                task = process_batch_item_task.delay(item)
+                                update_item(i, {"status": "processing", "celery_task_id": task.id})
                         st.rerun()
+
+                with c2:
+                    done_items = [i for i in queue if i.get('status') == 'done' and i.get('narrative')]
+                    if done_items:
+                        batch_xml = export_nibrs_xml(
+                            incidents=[{
+                                "incident_id": i.get('case_number', ''),
+                                "officer_name": i.get('officer_name', ''),
+                                "officer_id": i.get('officer_id', ''),
+                                "document_type": i.get('report_type', ''),
+                                "final_approved_report": i.get('narrative', ''),
+                                "call_id": i.get('call_id', ''),
+                                "call_type": i.get('call_type', ''),
+                                "location": i.get('location', ''),
+                            } for i in done_items]
+                        )
+                        st.download_button("Export All XML", data=batch_xml, file_name=f"nibrs_batch_{len(done_items)}.xml", mime="application/xml", use_container_width=True, key="bq_xml")
+                with c3:
+                    if queue and st.button("Clear All", use_container_width=True, key="bq_clear"):
+                        clear_queue()
+                        st.rerun()
+                        
+            any_processing = any(item.get('status') == 'processing' for item in get_queue())
+            if any_processing:
+                st_autorefresh(interval=2000, limit=100, key="batch_poller")
+                changed = False
+                for i, item in enumerate(get_queue()):
+                    if item.get('status') == 'processing' and item.get('celery_task_id'):
+                        res = AsyncResult(item['celery_task_id'])
+                        if res.ready():
+                            if res.successful():
+                                narrative = res.result
+                                update_item(i, {"status": "done" if not narrative.startswith("[ERROR]") else "error", "narrative": narrative, "error": narrative if narrative.startswith("[ERROR]") else ""})
+                            else:
+                                update_item(i, {"status": "error", "error": str(res.result)})
+                            changed = True
+                if changed:
+                    st.rerun()
 
                 with c2:
                     done_items = [i for i in queue if i.get('status') == 'done' and i.get('narrative')]

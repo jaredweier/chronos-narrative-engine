@@ -91,3 +91,29 @@ class FallbackLLMProvider(LLMProvider):
                 model="fallback_template",
                 duration_ms=duration,
             )
+
+    def stream_complete(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        timeout: int = 120,
+    ):
+        try:
+            stream = self._inner.stream_complete(
+                prompt=prompt, temperature=temperature,
+                max_tokens=max_tokens, timeout=timeout,
+            )
+            has_yielded = False
+            for token in stream:
+                if not has_yielded and token.startswith("[ERROR]"):
+                    logger.info("Inner LLM stream returned error; falling back to template generation")
+                    fallback_text = _generate_template_narrative(prompt)
+                    yield fallback_text
+                    return
+                has_yielded = True
+                yield token
+        except Exception as e:
+            logger.warning("Inner LLM stream raised %s; using template fallback", e)
+            fallback_text = _generate_template_narrative(prompt)
+            yield fallback_text

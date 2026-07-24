@@ -49,7 +49,11 @@ def list_pdf_providers() -> list:
     return list(_registry._pdf_providers.keys())
 
 
+_llm_instance = None
 def get_llm() -> LLMProvider:
+    global _llm_instance
+    if _llm_instance is not None:
+        return _llm_instance
     active = _registry._active_llm or LLM_PROVIDER
     cls = _registry._llm_providers.get(active)
     if cls is None:
@@ -58,10 +62,15 @@ def get_llm() -> LLMProvider:
             f"Available: {list_llm_providers()}. "
             f"Set CHRONOS_LLM_PROVIDER or call register_llm()."
         )
-    return cls()
+    _llm_instance = cls()
+    return _llm_instance
 
 
+_transcriber_instance = None
 def get_transcriber() -> TranscriberProvider:
+    global _transcriber_instance
+    if _transcriber_instance is not None:
+        return _transcriber_instance
     active = _registry._active_transcriber or TRANSCRIBER_PROVIDER
     cls = _registry._transcriber_providers.get(active)
     if cls is None:
@@ -70,10 +79,15 @@ def get_transcriber() -> TranscriberProvider:
             f"Available: {list_transcriber_providers()}. "
             f"Set CHRONOS_TRANSCRIBER_PROVIDER or call register_transcriber()."
         )
-    return cls()
+    _transcriber_instance = cls()
+    return _transcriber_instance
 
 
+_pdf_parser_instance = None
 def get_pdf_parser() -> PDFParserProvider:
+    global _pdf_parser_instance
+    if _pdf_parser_instance is not None:
+        return _pdf_parser_instance
     active = _registry._active_pdf or PDF_PARSER_PROVIDER
     cls = _registry._pdf_providers.get(active)
     if cls is None:
@@ -82,7 +96,8 @@ def get_pdf_parser() -> PDFParserProvider:
             f"Available: {list_pdf_providers()}. "
             f"Set CHRONOS_PDF_PARSER_PROVIDER or call register_pdf_parser()."
         )
-    return cls()
+    _pdf_parser_instance = cls()
+    return _pdf_parser_instance
 
 
 def set_active_llm(name: str):
@@ -103,4 +118,11 @@ def set_active_pdf_parser(name: str):
     _registry._active_pdf = name
 
 
+def clear_provider_cache():
+    global _llm_instance, _transcriber_instance, _pdf_parser_instance
+    if _transcriber_instance is not None:
+        _transcriber_instance.cleanup()
+    _llm_instance = None
+    _transcriber_instance = None
+    _pdf_parser_instance = None
 

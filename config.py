@@ -79,7 +79,7 @@ WHISPER_VAD_MIN_SPEECH_MS = _env_int("WHISPER_VAD_MIN_SPEECH_MS", 200)
 WHISPER_AUDIO_PREPROCESS = _env("WHISPER_AUDIO_PREPROCESS", "true").lower() == "true"
 WHISPER_INITIAL_PROMPT = _env("WHISPER_INITIAL_PROMPT", "The following is a law enforcement body camera recording. Officer, dispatch, suspect, traffic stop, investigation, patrol, squad, domestic, battery, OWI, PBT, Miranda.")
 WHISPER_NOISE_REDUCE_STRENGTH = _env_int("WHISPER_NOISE_REDUCE_STRENGTH", 75) / 100
-WHISPER_NOISE_REDUCE_METHOD = _env("WHISPER_NOISE_METHOD", "noisereduce")
+WHISPER_NOISE_REDUCE_METHOD = _env("WHISPER_NOISE_METHOD", "deepfilter")
 WHISPER_DEEPFILTER_ATTEN_LIM_DB = _env_int("WHISPER_DEEPFILTER_ATTEN", -1)
 WHISPER_WORD_TIMESTAMPS = _env("WHISPER_WORD_TIMESTAMPS", "true").lower() == "true"
 WHISPER_TRANSCRIPT_CORRECTOR_ENABLED = _env("WHISPER_TRANSCRIPT_CORRECTOR", "true").lower() == "true"
@@ -90,6 +90,12 @@ WHISPER_TWO_PASS_QUICK_MODEL = _env("WHISPER_TWO_PASS_QUICK_MODEL", "base")
 WHISPER_USE_BATCHED = _env("WHISPER_USE_BATCHED", "true").lower() == "true"
 WHISPER_ENABLE_ALIGNMENT = _env("WHISPER_ENABLE_ALIGNMENT", "true").lower() == "true"
 WHISPER_ENABLE_DIARIZATION = _env("WHISPER_ENABLE_DIARIZATION", "false").lower() == "true"
+
+# --- Vision & Multi-modal ---
+VISION_VLM_MODEL = _env("VISION_VLM_MODEL", "moondream2")
+VISION_ENABLE_ALPR = _env("VISION_ENABLE_ALPR", "true").lower() == "true"
+VISION_ENABLE_FACIAL_REC = _env("VISION_ENABLE_FACIAL_REC", "true").lower() == "true"
+VISION_ENABLE_ACTION_REC = _env("VISION_ENABLE_ACTION_REC", "true").lower() == "true"
 
 # --- Limits ---
 MAX_STYLE_EXAMPLES = _env_int("MAX_STYLE_EXAMPLES", 5)
@@ -156,3 +162,8 @@ if __name__ == '__main__':
     for k, v in sorted({k: v for k, v in globals().items() if k.isupper()}.items()):
         if not k.startswith('_'):
             print(f"  {k} = {v}")
+LLM_CACHE_ENABLED = True
+LLM_CACHE_TTL_SECONDS = 3600
+WHISPER_LANGUAGE = "en"
+DB_URL = "sqlite:///chronos.db"
+DB_PATH = "chronos.db"

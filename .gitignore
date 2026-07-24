@@ -1,15 +1,48 @@
+# Python
 venv/
 __pycache__/
 *.pyc
 *.pyo
-officers.json
+.pytest_cache/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+chronos.db
 department_reports.db
+
+# Sensitive Data / Secrets
+.env
+.env.*
+!.env.example
+.chronos_hmac_key
+officers.json
+
+# App Data / Evidence / Processing
 temp_processing/
 completed_reports/
 officer_profiles/
-.streamlit/
+evidence_storage/
 logs/
+*.log
+*.jsonl
 stderr.txt
 stdout.txt
-*.bat
-*.ps1
+
+# Streamlit
+.streamlit/
+
+# Frontend / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# IDE
+.vscode/
+.opencode.code-workspace
+
+# Scripts
+# *.bat and *.ps1 are in the repo, like setup_simple.bat, launch_report_system.bat. We should not ignore them if they are part of the codebase.
+# I will leave *.bat and *.ps1 out of gitignore so they can be tracked.

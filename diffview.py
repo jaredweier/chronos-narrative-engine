@@ -98,3 +98,27 @@ if __name__ == '__main__':
                 unsafe_allow_html=True,
             )
             st.text_area("Final", final_report, height=350, disabled=True, key="diff_final", label_visibility="collapsed")
+
+
+def diff_report_versions(incident_id: str) -> str:
+    from database import get_snapshots
+    snapshots = get_snapshots(incident_id)
+    if len(snapshots) < 2:
+        return "<div style='font-family:monospace;font-size:0.72rem;padding:16px;opacity:0.6;'>Less than 2 versions available for diff</div>"
+    all_diff_html = []
+    for i in range(1, len(snapshots)):
+        prev_text = snapshots[i-1].get("snapshot_text", "")
+        curr_text = snapshots[i].get("snapshot_text", "")
+        prev_label = snapshots[i-1].get("snapshot_label") or snapshots[i-1].get("label", f"Version {i}")
+        curr_label = snapshots[i].get("snapshot_label") or snapshots[i].get("label", f"Version {i+1}")
+        diff = compute_diff(prev_text, curr_text)
+        added = sum(1 for k, _ in diff if k == "added")
+        removed = sum(1 for k, _ in diff if k == "removed")
+        all_diff_html.append(
+            f"<div style='margin:12px 0 4px;font-size:0.66rem;font-family:monospace;'>"
+            f"<strong>{prev_label}</strong> \u2192 <strong>{curr_label}</strong>"
+            f" <span style='color:#22c55e;'>+{added}</span> <span style='color:#ef4444;'>-{removed}</span>"
+            f"</div>"
+        )
+        all_diff_html.append(render_diff_html(diff))
+    return "\n".join(all_diff_html)

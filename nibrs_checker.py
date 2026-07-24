@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 from config import OLLAMA_MODEL
 from logger import get_logger
 from llm_provider import get_llm_provider
+from wi_statutes import WI_CRIMINAL_STATUTES, statutes_for_nibrs, nibrs_for_statute
 
 logger = get_logger(__name__)
 
@@ -258,6 +259,85 @@ Return ONLY the JSON object, nothing else."""
         "factors_missing": ["Unable to analyze - Ollama may be unavailable"],
         "recommendations": ["Verify Ollama is running and try again"],
         "legal_notes": "",
+    }
+
+
+def suggest_statutes_from_narrative(narrative: str, limit: int = 5) -> List[Dict[str, Any]]:
+    words = re.findall(r'[a-zA-Z]+', narrative.lower())
+    word_freq = {}
+    for w in words:
+        if len(w) > 2:
+            word_freq[w] = word_freq.get(w, 0) + 1
+
+    scored = []
+    for statute in WI_CRIMINAL_STATUTES:
+        score = 0
+        search_text = statute.get("keywords", "") + " " + statute["title"] + " " + statute.get("description", "")
+        search_tokens = set(re.findall(r'[a-zA-Z]+', search_text.lower()))
+        for token in search_tokens:
+            if len(token) > 2:
+                score += word_freq.get(token, 0)
+        if score > 0:
+            scored.append((score, statute))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        {"code": s["code"], "title": s["title"], "score": sc}
+        for sc, s in scored[:limit]
+    ]
+
+
+def get_nibrs_for_statute(statute_code: str) -> str:
+    nibrs_codes = nibrs_for_statute(statute_code)
+    if nibrs_codes:
+        return ",".join(nibrs_codes)
+    return ""
+
+
+def check_statute_elements(narrative_text: str, statute_code: str, model: str = OLLAMA_MODEL) -> Dict[str, Any]:
+    from wi_statutes import WI_CRIMINAL_STATUTES
+    statute = next((s for s in WI_CRIMINAL_STATUTES if s["code"] == statute_code), None)
+    
+    if not statute:
+        return {
+            "statute_code": statute_code,
+            "error": "Statute not found in database",
+            "elements_checked": []
+        }
+        
+    prompt = f"""You are a strict legal compliance reviewer for law enforcement reports.
+
+Analyze this narrative against the legal elements of Wisconsin Statute {statute['code']}: {statute['title']}
+Description: {statute['description']}
+
+NARRATIVE:
+{narrative_text[:4000]}
+
+Identify the specific legal elements required for this crime, and check if the narrative articulates facts to support EACH element.
+
+Return a JSON object with:
+- "statute_code": "{statute['code']}"
+- "is_satisfied": boolean (true if all elements are clearly met, false if ANY are missing or weak)
+- "elements_checked": array of objects, each containing:
+    - "element": string (the legal requirement)
+    - "met": boolean (true if facts support it)
+    - "evidence": string (quote or summarize the facts from the narrative supporting it, or state "Missing")
+- "override_warning": string (a strong warning message if is_satisfied is false, explaining why it might be kicked back by a supervisor)
+
+Return ONLY the JSON object, nothing else."""
+
+    try:
+        provider = get_llm_provider()
+        result = provider.complete_json(prompt=prompt, timeout=60)
+        if isinstance(result, dict):
+            return result
+    except Exception as e:
+        logger.error("check_statute_elements: %s", e)
+
+    return {
+        "statute_code": statute_code,
+        "error": "Failed to analyze statute elements",
+        "elements_checked": []
     }
 
 

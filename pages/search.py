@@ -1,7 +1,28 @@
+import re
 import streamlit as st
 from html import escape as h
 from database import search_reports, search_officer_reports, rebuild_search_index, delete_reports
+from nibrs_export import build_nibrs_xml
 from ui import render_department_header
+
+
+def _highlight_match(text: str, query: str, max_len: int = 300) -> str:
+    if not query or not text:
+        return text[:max_len]
+    pos = text.lower().find(query.lower())
+    if pos == -1:
+        return text[:max_len]
+    start = max(0, pos - 150)
+    end = min(len(text), pos + len(query) + 150)
+    snippet = text[start:end]
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet = snippet + "..."
+    return re.sub(
+        re.escape(query), lambda m: f'<mark style="background:#f59e0b44;color:#fbbf24;padding:0 2px;border-radius:2px;">{m.group(0)}</mark>',
+        snippet, flags=re.IGNORECASE
+    )
 
 
 def render():
@@ -39,7 +60,8 @@ def render():
                 for r in results:
                     rid = r["id"]
                     ts = r.get('submission_timestamp', '')[:16].replace('T', ' ')
-                    text_preview = (r.get('final_approved_report') or r.get('unedited_ai_draft', ''))[:200]
+                    full_text = r.get('final_approved_report') or r.get('unedited_ai_draft', '')
+                    text_preview = _highlight_match(full_text, query)
                     col_a, col_b = st.columns([0.05, 0.95])
                     with col_a:
                         checked = rid in st.session_state["selected_ids"]
@@ -56,10 +78,10 @@ def render():
                             st.markdown(f"**Modified:** {'Yes' if r.get('was_modified_by_human') else 'No'}")
                             st.markdown(f"**Reviewed:** {r.get('review_status', 'N/A')}")
                             if text_preview:
-                                st.markdown("**Preview:**")
-                                st.text(text_preview)
+                                st.markdown("**Preview:**", unsafe_allow_html=True)
+                                st.markdown(f"<div style='font-size:0.7rem;'>{text_preview}</div>", unsafe_allow_html=True)
                             st.download_button(
-                                "Download Text", data=text_preview,
+                                "Download Text", data=full_text[:2000],
                                 file_name=f"{r.get('incident_id', 'report')}.txt",
                                 mime="text/plain", key=f"dl_{rid}",
                             )
@@ -67,7 +89,7 @@ def render():
                 bulk_count = len(st.session_state["selected_ids"])
                 if bulk_count > 0:
                     st.markdown(f"<div style='margin-top:12px;font-size:0.7rem;opacity:0.5;'>{bulk_count} report(s) selected</div>", unsafe_allow_html=True)
-                    bc1, bc2, bc3 = st.columns([1, 1, 3])
+                    bc1, bc2, bc3, bc4 = st.columns([1, 1, 1, 2])
                     with bc1:
                         selected_data = []
                         for r in results:
@@ -84,6 +106,26 @@ def render():
                             key="bulk_download",
                         )
                     with bc2:
+                        selected_nibrs = []
+                        for r in results:
+                            if r["id"] in st.session_state["selected_ids"]:
+                                text_r = r.get('final_approved_report') or r.get('unedited_ai_draft', '')
+                                nibrs_xml = build_nibrs_xml(
+                                    incident_id=r.get('incident_id', ''),
+                                    officer_name=r.get('officer_name', ''),
+                                    officer_id=r.get('officer_id', ''),
+                                    report_type=r.get('document_type', ''),
+                                    narrative=text_r,
+                                )
+                                selected_nibrs.append(nibrs_xml)
+                        batch_nibrs = f"<NIBRSBatch>{''.join(selected_nibrs)}</NIBRSBatch>"
+                        st.download_button(
+                            "NIBRS XML", data=batch_nibrs,
+                            file_name=f"nibrs_batch_{bulk_count}.xml",
+                            mime="application/xml",
+                            use_container_width=True, key="bulk_nibrs",
+                        )
+                    with bc3:
                         role = st.session_state.get('_user_role', '')
                         if role in ('supervisor', 'admin'):
                             if st.button("Bulk Delete", type="secondary", use_container_width=True, key="bulk_delete"):

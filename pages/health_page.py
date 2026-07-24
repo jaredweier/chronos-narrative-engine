@@ -43,6 +43,22 @@ def render():
                     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
                         tail = f.readlines()[-100:]
                         st.code("".join(tail), language=None)
+
+        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='card-header'>Log Management</div>", unsafe_allow_html=True)
+        from logger import archive_logs, download_logs_zip
+        lc1, lc2 = st.columns(2)
+        with lc1:
+            if st.button("Archive Old Logs", use_container_width=True, key="archive_logs_btn"):
+                archived = archive_logs()
+                if archived:
+                    st.success(f"Archived {archived} log file(s)")
+                else:
+                    st.info("No logs to archive")
+                st.rerun()
+        with lc2:
+            logs_zip = download_logs_zip()
+            st.download_button("Download Logs ZIP", data=logs_zip, file_name="chronos_logs.zip", mime="application/zip", use_container_width=True, key="dl_logs_zip")
     except Exception as e:
         logger.exception("Health page error: %s", e)
         st.error(f"Error: {e}")

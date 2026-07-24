@@ -2,7 +2,7 @@ import re
 from typing import Optional, List, Callable, Dict, Any
 from config import MAX_TRANSCRIPT_CHARS, MAX_STYLE_EXAMPLE_CHARS, MAX_CAD_TEXT_CHARS, MAX_TOTAL_PROMPT_CHARS
 from llm_provider import get_llm_provider
-from wi_statutes import format_statutes_for_prompt
+from wi_statutes import format_statutes_for_prompt, find_statutes_in_text
 
 
 _INJECTION_PATTERNS = [
@@ -39,6 +39,8 @@ _SYSTEM_PROMPT = (
     "Be specific about times, locations, and actions taken. "
     "If a required detail (name, time, location, etc.) is NOT present in the provided evidence, "
     "use [INSERT DETAIL] as a placeholder instead of inventing it. "
+    "CRITICAL REQUIREMENT (TRACEABILITY): You MUST cite your sources. When stating a fact from the bodycam transcript, "
+    "append the exact timestamp in brackets like [MM:SS] next to the fact. Do NOT invent timestamps. "
     "Structure the narrative with a clear beginning (response), middle (investigation/observations), and end (disposition)."
 )
 
@@ -46,6 +48,7 @@ def _build_narrative_prompt(
     system_prompt: str,
     cad_text: str = "",
     transcript: str = "",
+    dispatch_audio_transcript: str = "",
     officer_style_examples: Optional[List[str]] = None,
     custom_notes: str = "",
     report_type: str = "Standard Incident Report",
@@ -77,6 +80,11 @@ def _build_narrative_prompt(
         parts.append(transcript[:MAX_TRANSCRIPT_CHARS])
         parts.append("--- END TRANSCRIPT ---")
 
+    if dispatch_audio_transcript:
+        parts.append("\n--- 911 DISPATCH AUDIO TRANSCRIPT ---")
+        parts.append(dispatch_audio_transcript[:MAX_TRANSCRIPT_CHARS])
+        parts.append("--- END DISPATCH TRANSCRIPT ---")
+
     if raw_text:
         parts.append("\n--- RAW INCIDENT INFORMATION ---")
         parts.append(raw_text)
@@ -100,6 +108,12 @@ def _call_llm(prompt: str, stream: bool = False, chunk_callback: Optional[Callab
     return response.text
 
 
+def _stream_llm(prompt: str):
+    provider = get_llm_provider()
+    for chunk in provider.stream_complete(prompt=prompt):
+        yield chunk
+
+
 def count_insert_placeholders(text: str) -> int:
     return len(_INSERT_PLACEHOLDER_RE.findall(text))
 
@@ -111,17 +125,43 @@ def has_unfilled_placeholders(text: str) -> bool:
 def generate_narrative(
     cad_text: str = "",
     transcript: str = "",
+    dispatch_audio_transcript: str = "",
     officer_style_examples: Optional[List[str]] = None,
     custom_notes: str = "",
     report_type: str = "Standard Incident Report",
     statutes: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     prompt = _build_narrative_prompt(
-        _SYSTEM_PROMPT, cad_text, transcript,
+        _SYSTEM_PROMPT, cad_text, transcript, dispatch_audio_transcript,
         officer_style_examples, custom_notes, report_type,
         statutes=statutes,
     )
-    return _call_llm(prompt)
+    narrative = _call_llm(prompt)
+    found = find_statutes_in_text(narrative)
+    if found:
+        parts = [narrative, "\n\n---\nReferenced Statutes:"]
+        for s in found:
+            parts.append(f"\n- {s['code']}: {s['title']}")
+        narrative = "".join(parts)
+    return narrative
+
+
+def generate_narrative_stream(
+    cad_text: str = "",
+    transcript: str = "",
+    dispatch_audio_transcript: str = "",
+    officer_style_examples: Optional[List[str]] = None,
+    custom_notes: str = "",
+    report_type: str = "Standard Incident Report",
+    statutes: Optional[List[Dict[str, Any]]] = None,
+):
+    prompt = _build_narrative_prompt(
+        _SYSTEM_PROMPT, cad_text, transcript, dispatch_audio_transcript,
+        officer_style_examples, custom_notes, report_type,
+        statutes=statutes,
+    )
+    for chunk in _stream_llm(prompt):
+        yield chunk
 
 
 

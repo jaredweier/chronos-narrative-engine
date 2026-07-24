@@ -80,7 +80,7 @@ def render():
                 )
             else:
                 for ef in db_files:
-                    cols = st.columns([3, 1, 1, 1])
+                    cols = st.columns([3, 1, 1, 1, 1])
                     with cols[0]:
                         st.markdown(f"**{h(ef['file_name'])}**<br><span style='font-size:0.6rem;opacity:0.4;'>{ef.get('description','')[:60]}</span>", unsafe_allow_html=True)
                     with cols[1]:
@@ -88,6 +88,13 @@ def render():
                     with cols[2]:
                         st.markdown(f"<div style='font-size:0.6rem;opacity:0.4;'>{ef['uploaded_at'][:16].replace('T',' ')}</div>", unsafe_allow_html=True)
                     with cols[3]:
+                        with st.popover("QR", key=f"qr_pop_{ef['id']}"):
+                            st.markdown(f"**Evidence ID:** {h(ef.get('evidence_id', '')) or h(ef['file_name'])}")
+                            st.markdown(f"**Incident ID:** {h(incident_id)}")
+                            st.markdown(f"**Timestamp:** {ef['uploaded_at'][:16].replace('T',' ')}")
+                            st.markdown("---")
+                            st.info("Print this label and affix to physical evidence item")
+                    with cols[4]:
                         if os.path.exists(ef['file_path']):
                             with open(ef['file_path'], 'rb') as f:
                                 st.download_button("DL", data=f, file_name=ef['file_name'],

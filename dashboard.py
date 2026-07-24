@@ -1,9 +1,12 @@
+import io
+import csv
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from html import escape as h
 from typing import Dict, Any, List
 from database import get_db_connection, get_statistics, get_review_counts
+from export import export_report_pdf
 from health import run_all_checks, render_health_dashboard
 from ui import render_department_header
 from logger import get_logger
@@ -21,7 +24,7 @@ def get_recent_activity(days: int = 30, limit: int = 50) -> List[Dict[str, Any]]
                FROM legal_audit_logs
                WHERE submission_timestamp >= ?
                ORDER BY submission_timestamp DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (cutoff, limit),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -44,7 +47,7 @@ def get_officer_activity(limit: int = 10) -> List[Dict[str, Any]]:
                FROM legal_audit_logs
                GROUP BY officer_name
                ORDER BY report_count DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -84,6 +87,50 @@ def get_modification_rate() -> float:
 def mode_dashboard():
     try:
         render_department_header()
+
+        stats = get_statistics()
+        total = stats["total_submissions"]
+        export_col1, export_col2 = st.columns([1, 6])
+        with export_col1:
+            if total > 0:
+                dashboard_text = (
+                    f"Chronos Dashboard Report\n"
+                    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"Total Reports: {total}\n"
+                    f"Verified: {stats.get('verified', 0)}\n"
+                    f"Modified Rate: {get_modification_rate()}%\n"
+                    f"Report Types: {len(stats.get('by_document_type', {}))}\n"
+                    f"\nReports by Type:\n"
+                )
+                for dtype, dcount in stats.get("by_document_type", {}).items():
+                    dashboard_text += f"  {dtype}: {dcount}\n"
+                pdf_bytes = export_report_pdf(
+                    dashboard_text, "Dashboard", "SYSTEM",
+                    incident_id="DASHBOARD",
+                )
+                st.download_button(
+                    "Export Dashboard PDF", data=pdf_bytes,
+                    file_name="chronos_dashboard.pdf", mime="application/pdf",
+                    use_container_width=True, key="dash_pdf",
+                )
+        with export_col2:
+            if total > 0:
+                csv_buf = io.StringIO()
+                cw = csv.writer(csv_buf)
+                cw.writerow(["Metric", "Value"])
+                cw.writerow(["Total Reports", total])
+                cw.writerow(["Verified", stats.get('verified', 0)])
+                cw.writerow(["Modified Rate (%)", get_modification_rate()])
+                cw.writerow(["Report Types", len(stats.get('by_document_type', {}))])
+                cw.writerow([])
+                cw.writerow(["Report Type", "Count"])
+                for dtype, dcount in stats.get("by_document_type", {}).items():
+                    cw.writerow([dtype, dcount])
+                st.download_button(
+                    "Export Dashboard CSV", data=csv_buf.getvalue(),
+                    file_name="chronos_dashboard.csv", mime="text/csv",
+                    use_container_width=True, key="dash_csv",
+                )
 
         st.markdown("<div class='card-header'>System Health</div>", unsafe_allow_html=True)
         checks = run_all_checks()

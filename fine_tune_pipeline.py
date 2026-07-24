@@ -14,6 +14,7 @@ Usage:
     python fine_tune_pipeline.py train --model large-v3-turbo --epochs 3
 """
 import argparse
+import difflib
 import json
 import os
 import sys
@@ -231,6 +232,39 @@ def main():
 
     else:
         parser.print_help()
+
+
+def export_quality_report(output_dir: str = None) -> str:
+    from config import BASE_DIR
+    pairs = export_training_pairs(min_pairs=1, output_dir=output_dir)
+    if not pairs:
+        report = {"total_pairs": 0, "average_edit_distance": 0.0, "common_corrections": [], "by_document_type": {}}
+    else:
+        total = len(pairs)
+        distances = []
+        for p in pairs:
+            matcher = difflib.SequenceMatcher(None, p["ai_draft"], p["corrected"])
+            ratio = matcher.ratio()
+            distances.append(ratio)
+        avg_distance = sum(distances) / total if total else 0.0
+        by_type = {}
+        for p in pairs:
+            dt = p.get("document_type", "unknown")
+            by_type.setdefault(dt, 0)
+            by_type[dt] += 1
+        report = {
+            "total_pairs": total,
+            "average_edit_distance": round(1 - avg_distance, 4),
+            "by_document_type": by_type,
+        }
+    if output_dir is None:
+        output_dir = os.path.join(BASE_DIR, "training_data")
+    os.makedirs(output_dir, exist_ok=True)
+    report_path = os.path.join(output_dir, "quality_report.json")
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    logger.info("Quality report written to %s", report_path)
+    return report_path
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+@echo off
+echo Requesting Administrator privileges...
+powershell -Command "Start-Process -Verb RunAs -FilePath 'powershell.exe' -ArgumentList '-ExecutionPolicy Bypass -File \"%~dp0automate_infra_setup.ps1\"'"

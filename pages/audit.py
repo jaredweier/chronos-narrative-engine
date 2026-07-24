@@ -39,14 +39,14 @@ def render():
                     like_phrase = f"%{search_text}%"
                     rows = conn.execute(
                         """SELECT * FROM legal_audit_logs
-                           WHERE incident_id LIKE ? OR officer_name LIKE ?
-                              OR unedited_ai_draft LIKE ? OR final_approved_report LIKE ?
+                           WHERE incident_id LIKE %s OR officer_name LIKE %s
+                              OR unedited_ai_draft LIKE %s OR final_approved_report LIKE %s
                            ORDER BY submission_timestamp DESC LIMIT 50""",
                         (like_phrase, like_phrase, like_phrase, like_phrase)
                     ).fetchall()
                 elif search_id:
                     rows = conn.execute(
-                        "SELECT * FROM legal_audit_logs WHERE incident_id LIKE ? OR officer_name LIKE ? ORDER BY submission_timestamp DESC LIMIT 50",
+                        "SELECT * FROM legal_audit_logs WHERE incident_id LIKE %s OR officer_name LIKE %s ORDER BY submission_timestamp DESC LIMIT 50",
                         (f"%{search_id}%", f"%{search_id}%")
                     ).fetchall()
                 else:

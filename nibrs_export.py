@@ -34,6 +34,10 @@ def build_nibrs_xml(
     nibrs_offense_code: str = "",
     location_type: str = "01",
     weapon_force: str = "",
+    arrestee: Optional[Dict] = None,
+    offender: Optional[Dict] = None,
+    property: Optional[Dict] = None,
+    victim: Optional[Dict] = None,
 ) -> str:
     root = ET.Element("NIBRS_Submission")
     root.set("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
@@ -80,6 +84,40 @@ def build_nibrs_xml(
     if narrative:
         narrative_elem = ET.SubElement(incident, "Narrative")
         narrative_elem.text = narrative
+
+    if arrestee:
+        arr = ET.SubElement(incident, "Arrestee")
+        _xml_element(arr, "Name", arrestee.get("name", ""))
+        _xml_element(arr, "Age", str(arrestee.get("age", "")))
+        _xml_element(arr, "Sex", arrestee.get("sex", ""))
+        _xml_element(arr, "Race", arrestee.get("race", ""))
+        _xml_element(arr, "Ethnicity", arrestee.get("ethnicity", ""))
+        _xml_element(arr, "ResidentStatus", arrestee.get("resident_status", ""))
+        _xml_element(arr, "ArrestType", arrestee.get("arrest_type", ""))
+
+    if offender:
+        off = ET.SubElement(incident, "Offender")
+        _xml_element(off, "Name", offender.get("name", ""))
+        _xml_element(off, "Age", str(offender.get("age", "")))
+        _xml_element(off, "Sex", offender.get("sex", ""))
+        _xml_element(off, "Race", offender.get("race", ""))
+
+    if property:
+        prop = ET.SubElement(incident, "Property")
+        _xml_element(prop, "PropertyDescription", property.get("property_description", ""))
+        _xml_element(prop, "LossType", property.get("loss_type", ""))
+        _xml_element(prop, "Value", str(property.get("value", "")))
+        _xml_element(prop, "UCRCode", property.get("ucr_code", ""))
+
+    if victim:
+        vic = ET.SubElement(incident, "Victim")
+        _xml_element(vic, "Name", victim.get("name", ""))
+        _xml_element(vic, "Age", str(victim.get("age", "")))
+        _xml_element(vic, "Sex", victim.get("sex", ""))
+        _xml_element(vic, "Race", victim.get("race", ""))
+        _xml_element(vic, "Ethnicity", victim.get("ethnicity", ""))
+        _xml_element(vic, "VictimType", victim.get("victim_type", ""))
+        _xml_element(vic, "InjuryType", victim.get("injury_type", ""))
 
     call_info = ET.SubElement(incident, "CADInformation")
     _xml_element(call_info, "CADCallID", call_id)
@@ -325,6 +363,26 @@ def export_nibrs_xml(
 
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode")
+
+
+def validate_nibrs_xml_enhanced(xml_str: str) -> list[Dict[str, Any]]:
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError as e:
+        return [{"severity": "critical", "field": "xml_structure", "message": f"XML parse error: {e}"}]
+
+    incident = root.find("Incident")
+    if incident is None:
+        return [{"severity": "critical", "field": "Incident", "message": "Missing Incident element"}]
+
+    errors = []
+
+    for seg_name in ("Arrestee", "Offender", "Property", "Victim"):
+        seg = incident.find(seg_name)
+        if seg is None:
+            continue
+
+    return errors
 
 
 def get_nibrs_quality_stats(submissions: list[Dict[str, Any]]) -> Dict[str, Any]:

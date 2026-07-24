@@ -74,3 +74,39 @@ class OllamaLLMProvider(LLMProvider):
                 text=f"[ERROR] Generation failed: {e}",
                 model=self.model,
             )
+
+    def stream_complete(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        timeout: int = 120,
+    ):
+        body = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "top_p": 0.9,
+            },
+        }
+        try:
+            response = requests.post(self.base_url, json=body, stream=True, timeout=timeout)
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    data = json.loads(line)
+                    token = data.get("response", "")
+                    if token:
+                        yield token
+
+        except requests.ConnectionError:
+            yield "[ERROR] Cannot connect to Ollama. Please ensure Ollama is running (ollama serve)."
+        except requests.Timeout:
+            yield "[ERROR] Generation timed out. The model may be overloaded."
+        except Exception as e:
+            logger.error("Ollama stream failed: %s", e)
+            yield f"[ERROR] Generation failed: {e}"

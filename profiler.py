@@ -3,7 +3,7 @@ import re
 import glob
 from typing import List, Optional
 from pathlib import Path
-from config import PROFILES_DIR
+from config import PROFILES_DIR, MAX_STYLE_EXAMPLES, MAX_STYLE_SAMPLES_PER_OFFICER
 from logger import get_logger
 from utils import extract_text_from_pdf
 
@@ -33,7 +33,12 @@ REPORT_CATEGORIES = [
     "Standard Incident Report",
     "Search Warrant Affidavit",
     "Internal Use-of-Force Review",
-    "OWI / DUI Report"
+    "OWI / DUI Report",
+    "Domestic Violence Supplement",
+    "Juvenile Offense Report",
+    "Missing Person Report",
+    "Narcotics Incident Report",
+    "Sexual Assault Kit (SAK) Documentation",
 ]
 
 
@@ -51,8 +56,18 @@ def save_style_sample(officer_name: str, category: str, sample_text: str, filena
     category_dir = get_category_dir(officer_name, category)
     os.makedirs(category_dir, exist_ok=True)
     
-    if filename is None:
+    existing = _get_all_sample_files(category_dir)
+    if len(existing) >= MAX_STYLE_SAMPLES_PER_OFFICER:
+        existing.sort(key=os.path.getmtime)
+        excess = len(existing) - MAX_STYLE_SAMPLES_PER_OFFICER + 1
+        for fpath in existing[:excess]:
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
         existing = _get_all_sample_files(category_dir)
+    
+    if filename is None:
         filename = f'sample_{len(existing) + 1}.txt'
     
     filepath = os.path.join(category_dir, filename)
@@ -69,16 +84,19 @@ def _get_all_sample_files(category_dir: str) -> List[str]:
     return sorted(files)
 
 
-def get_style_examples(officer_name: str, category: str, max_examples: int = 5) -> List[str]:
+def get_style_examples(officer_name: str, category: str, max_examples: Optional[int] = None) -> List[str]:
     category_dir = get_category_dir(officer_name, category)
     
     if not os.path.exists(category_dir):
         return []
     
     sample_files = _get_all_sample_files(category_dir)
+    sample_files.sort(key=os.path.getmtime, reverse=True)
+    
+    limit = max_examples if max_examples is not None else MAX_STYLE_EXAMPLES
     
     examples = []
-    for filepath in sample_files[:max_examples]:
+    for filepath in sample_files[:limit]:
         try:
             content = extract_text_from_file(filepath).strip()
             if content:

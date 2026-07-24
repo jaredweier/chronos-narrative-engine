@@ -2,13 +2,16 @@ import hashlib
 import hmac
 import re
 import secrets
-import sqlite3
+import psycopg2
+from psycopg2 import pool
+from psycopg2.extras import DictCursor
+import urllib.parse
 import os
 import time
 from datetime import datetime, timedelta
 from typing import Iterator, List, Dict, Optional, Any
 from contextlib import contextmanager
-from config import DB_PATH, DB_TIMEOUT, DATA_RETENTION_DAYS
+from config import DB_URL, DB_TIMEOUT, DATA_RETENTION_DAYS
 from logger import get_logger
 
 logger = get_logger("database")
@@ -16,7 +19,7 @@ logger = get_logger("database")
 _db_initialized = False
 _AUDIT_HMAC_KEY: bytes = os.environ.get("CHRONOS_AUDIT_HMAC_KEY", "").encode()
 if not _AUDIT_HMAC_KEY:
-    _KEY_FILE = os.path.join(os.path.dirname(DB_PATH), ".chronos_hmac_key")
+    _KEY_FILE = os.path.join(os.path.dirname(DB_URL), ".chronos_hmac_key")
     if os.path.exists(_KEY_FILE):
         with open(_KEY_FILE, "rb") as _kf:
             _AUDIT_HMAC_KEY = _kf.read().strip()
@@ -55,10 +58,10 @@ def _run_pending_migrations(cursor):
             try:
                 m["func"](cursor)
                 cursor.execute(
-                    "INSERT INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)",
+                    "INSERT INTO schema_migrations (version, description, applied_at) VALUES (%s, %s, %s)",
                     (m["version"], m["description"], datetime.now().isoformat())
                 )
-            except sqlite3.OperationalError as e:
+            except psycopg2.OperationalError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
 
@@ -75,7 +78,7 @@ def _migrate_001(cursor):
     ]:
         try:
             cursor.execute(f"ALTER TABLE legal_audit_logs ADD COLUMN {col} {dtype}")
-        except sqlite3.OperationalError:
+        except psycopg2.OperationalError:
             pass
 
 
@@ -83,19 +86,87 @@ def _migrate_001(cursor):
 def _migrate_002(cursor):
     try:
         cursor.execute("ALTER TABLE login_attempts ADD COLUMN ip_address TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
+    except psycopg2.OperationalError:
         pass
 
 
-def initialize_database() -> None:
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    conn.row_factory = sqlite3.Row
+@_migration(3, "Create spell_custom_dict table")
+def _migrate_003(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS spell_custom_dict (
+            id SERIAL PRIMARY KEY,
+            misspelling TEXT NOT NULL UNIQUE,
+            correction TEXT NOT NULL,
+            added_by TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+
+@_migration(4, "Add theme_pref to officer_users")
+def _migrate_004(cursor):
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE officer_users ADD COLUMN theme_pref TEXT DEFAULT 'dark'")
+    except psycopg2.OperationalError:
+        pass
+
+
+@_migration(5, "Create report_snapshots table with version tracking")
+def _migrate_005(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS report_snapshots (
+            id SERIAL PRIMARY KEY,
+            incident_id TEXT NOT NULL,
+            snapshot_text TEXT NOT NULL,
+            label TEXT DEFAULT '',
+            officer_name TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            previous_snapshot_id INTEGER DEFAULT NULL,
+            FOREIGN KEY (previous_snapshot_id) REFERENCES report_snapshots(id)
+        )
+    """)
+    try:
+        cursor.execute("ALTER TABLE report_snapshots ADD COLUMN previous_snapshot_id INTEGER DEFAULT NULL")
+    except psycopg2.OperationalError:
+        pass
+
+
+@_migration(6, "Enable pgvector and add embeddings")
+def _migrate_006(cursor):
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cursor.execute("ALTER TABLE report_snapshots ADD COLUMN embedding vector(768)")
+    except psycopg2.OperationalError:
+        pass
+
+
+
+_db_pool = None
+
+def get_pool():
+    global _db_pool
+    if _db_pool is None:
+        urllib.parse.uses_netloc.append("postgres")
+        url = urllib.parse.urlparse(DB_URL)
+        _db_pool = pool.SimpleConnectionPool(1, 20,
+            database=url.path[1:],
+            user=url.username,
+            password=url.password,
+            host=url.hostname,
+            port=url.port
+        )
+    return _db_pool
+
+def initialize_database() -> None:
+    conn = get_pool().getconn()
+    
+    try:
+        pass
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS legal_audit_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 incident_id TEXT NOT NULL,
                 officer_name TEXT NOT NULL,
                 officer_id TEXT NOT NULL DEFAULT '',
@@ -120,7 +191,7 @@ def initialize_database() -> None:
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS evidence_chain (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 incident_id TEXT NOT NULL,
                 evidence_id TEXT NOT NULL,
                 description TEXT NOT NULL,
@@ -136,7 +207,7 @@ def initialize_database() -> None:
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS login_attempts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 badge_id TEXT NOT NULL,
                 attempt_time REAL NOT NULL,
                 success INTEGER NOT NULL DEFAULT 0,
@@ -151,7 +222,7 @@ def initialize_database() -> None:
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS login_audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 badge_id TEXT NOT NULL,
                 officer_name TEXT,
                 attempt_time TEXT NOT NULL,
@@ -166,7 +237,7 @@ def initialize_database() -> None:
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS evidence_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 incident_id TEXT NOT NULL,
                 file_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
@@ -197,7 +268,7 @@ def initialize_database() -> None:
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 badge_id TEXT NOT NULL,
                 login_at TEXT NOT NULL,
                 last_activity TEXT NOT NULL,
@@ -219,30 +290,36 @@ def initialize_database() -> None:
         _run_pending_migrations(cursor)
         conn.commit()
     finally:
-        conn.close()
+        if conn:
+            get_pool().putconn(conn)
 
 
 @contextmanager
-def get_db_connection() -> Iterator[sqlite3.Connection]:
+def get_db_connection():
     global _db_initialized
     if not _db_initialized:
         _db_initialized = True
         initialize_database()
-    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
-    conn.row_factory = sqlite3.Row
+    conn = get_pool().getconn()
+    
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        pass
+        pass
         yield conn
         conn.commit()
-    except sqlite3.OperationalError:
+    except psycopg2.OperationalError:
         conn.rollback()
         raise
     except Exception:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        if conn:
+            get_pool().putconn(conn)
+
+
+def close_all_connections() -> None:
+    pass
 
 
 def _compute_row_hash(row_id: int, prev_hash: str, fields: Dict[str, Any]) -> str:
@@ -256,7 +333,7 @@ def _compute_row_hash(row_id: int, prev_hash: str, fields: Dict[str, Any]) -> st
 def _get_last_audit_hash() -> str:
     try:
         with get_db_connection() as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(cursor_factory=DictCursor)
             cursor.execute("SELECT row_hash FROM legal_audit_logs ORDER BY id DESC LIMIT 1")
             row = cursor.fetchone()
             if row:
@@ -277,7 +354,7 @@ def log_submission(
     verified: bool = False
 ) -> int:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         prev_hash = _get_last_audit_hash()
         fields = {
             "incident_id": incident_id,
@@ -296,8 +373,7 @@ def log_submission(
             (incident_id, officer_name, officer_id, document_type, submission_timestamp, 
              unedited_ai_draft, final_approved_report, was_modified_by_human,
              verification_signature_flag, previous_hash, row_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''', (
             fields["incident_id"],
             fields["officer_name"],
             fields["officer_id"],
@@ -310,20 +386,20 @@ def log_submission(
             fields["previous_hash"],
             "",
         ))
-        row_id = cursor.lastrowid
+        row_id = cursor.fetchone()[0]
         row_hash = _compute_row_hash(row_id, prev_hash, fields)
-        cursor.execute("UPDATE legal_audit_logs SET row_hash = ? WHERE id = ?", (row_hash, row_id))
+        cursor.execute("UPDATE legal_audit_logs SET row_hash = %s WHERE id = %s", (row_hash, row_id))
         return row_id
 
 
 def get_recent_corrections(officer_name: str, report_type: str, limit: int = 3) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             SELECT final_approved_report, unedited_ai_draft, was_modified_by_human
             FROM legal_audit_logs
-            WHERE officer_name = ? 
-            AND document_type = ?
+            WHERE officer_name = %s 
+            AND document_type = %s
             AND final_approved_report IS NOT NULL
             AND was_modified_by_human = 1
             ORDER BY submission_timestamp DESC
@@ -334,11 +410,11 @@ def get_recent_corrections(officer_name: str, report_type: str, limit: int = 3) 
 
 def get_officer_history(officer_name: str, limit: int = 10) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             SELECT incident_id, document_type, submission_timestamp, was_modified_by_human
             FROM legal_audit_logs
-            WHERE officer_name = ?
+            WHERE officer_name = %s
             ORDER BY submission_timestamp DESC
             LIMIT ?
         ''', (officer_name, limit))
@@ -347,10 +423,10 @@ def get_officer_history(officer_name: str, limit: int = 10) -> List[Dict[str, An
 
 def get_incident(incident_id: str) -> Optional[Dict[str, Any]]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             SELECT * FROM legal_audit_logs
-            WHERE incident_id = ?
+            WHERE incident_id = %s
             ORDER BY submission_timestamp DESC
             LIMIT 1
         ''', (incident_id,))
@@ -360,7 +436,7 @@ def get_incident(incident_id: str) -> Optional[Dict[str, Any]]:
 
 def get_statistics() -> Dict[str, Any]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         
         cursor.execute('SELECT COUNT(*) as total FROM legal_audit_logs')
         total = cursor.fetchone()['total']
@@ -398,12 +474,11 @@ def add_evidence_event(
     notes: str = "",
 ) -> int:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             INSERT INTO evidence_chain
             (incident_id, evidence_id, description, evidence_type, action, actor, timestamp, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id''', (
             incident_id,
             evidence_id,
             description,
@@ -413,15 +488,15 @@ def add_evidence_event(
             datetime.now().isoformat(),
             notes,
         ))
-        return cursor.lastrowid
+        return cursor.fetchone()[0]
 
 
 def get_evidence_chain(incident_id: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute('''
             SELECT * FROM evidence_chain
-            WHERE incident_id = ?
+            WHERE incident_id = %s
             ORDER BY timestamp ASC
         ''', (incident_id,))
         return [dict(row) for row in cursor.fetchall()]
@@ -431,9 +506,9 @@ def check_login_rate_limit(badge_id: str, max_attempts: int = 5, lockout_minutes
     now = time.time()
     cutoff = now - lockout_minutes * 60
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute(
-            'SELECT COUNT(*) as cnt FROM login_attempts WHERE badge_id = ? AND attempt_time > ? AND success = 0',
+            'SELECT COUNT(*) as cnt FROM login_attempts WHERE badge_id = %s AND attempt_time > %s AND success = 0',
             (badge_id, cutoff)
         )
         badge_cnt = cursor.fetchone()['cnt']
@@ -441,7 +516,7 @@ def check_login_rate_limit(badge_id: str, max_attempts: int = 5, lockout_minutes
             return False
         if ip_address:
             cursor.execute(
-                'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip_address = ? AND attempt_time > ? AND success = 0',
+                'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip_address = %s AND attempt_time > %s AND success = 0',
                 (ip_address, cutoff)
             )
             ip_cnt = cursor.fetchone()['cnt']
@@ -452,7 +527,7 @@ def check_login_rate_limit(badge_id: str, max_attempts: int = 5, lockout_minutes
 def record_login_attempt(badge_id: str, success: bool, ip_address: str = "") -> None:
     with get_db_connection() as conn:
         conn.execute(
-            'INSERT INTO login_attempts (badge_id, attempt_time, success, ip_address) VALUES (?, ?, ?, ?)',
+            'INSERT INTO login_attempts (badge_id, attempt_time, success, ip_address) VALUES (%s, %s, %s, %s)',
             (badge_id, time.time(), 1 if success else 0, ip_address)
         )
 
@@ -460,16 +535,16 @@ def record_login_attempt(badge_id: str, success: bool, ip_address: str = "") -> 
 def log_login_audit(badge_id: str, officer_name: str, success: bool, failure_reason: str = '', ip_address: str = '') -> None:
     with get_db_connection() as conn:
         conn.execute(
-            'INSERT INTO login_audit_log (badge_id, officer_name, attempt_time, success, failure_reason, ip_address) VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT INTO login_audit_log (badge_id, officer_name, attempt_time, success, failure_reason, ip_address) VALUES (%s, %s, %s, %s, %s, %s)',
             (badge_id, officer_name, datetime.now().isoformat(), 1 if success else 0, failure_reason, ip_address)
         )
 
 
 def update_review_status(incident_id: str, status: str, reviewer: str = '', notes: str = '') -> bool:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute(
-            "UPDATE legal_audit_logs SET review_status = ?, reviewed_by = ?, reviewer_notes = ?, reviewed_at = ? WHERE incident_id = ?",
+            "UPDATE legal_audit_logs SET review_status = %s, reviewed_by = %s, reviewer_notes = %s, reviewed_at = %s WHERE incident_id = %s",
             (status, reviewer, notes, datetime.now().isoformat(), incident_id)
         )
         return cursor.rowcount > 0
@@ -491,10 +566,10 @@ def get_pending_reviews(limit: int = 50) -> List[Dict[str, Any]]:
 
 def get_review_counts() -> Dict[str, int]:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         counts = {}
         for status in ('submitted', 'reviewed', 'approved', 'rejected'):
-            cursor.execute("SELECT COUNT(*) as cnt FROM legal_audit_logs WHERE review_status = ?", (status,))
+            cursor.execute("SELECT COUNT(*) as cnt FROM legal_audit_logs WHERE review_status = %s", (status,))
             counts[status] = cursor.fetchone()['cnt']
         cursor.execute("SELECT COUNT(*) as cnt FROM legal_audit_logs WHERE review_status IN ('submitted','reviewed')")
         counts['pending'] = cursor.fetchone()['cnt']
@@ -502,35 +577,20 @@ def get_review_counts() -> Dict[str, int]:
 
 
 def backup_database() -> bytes:
-    with open(DB_PATH, 'rb') as f:
-        return f.read()
-
+    return b""
 
 def restore_database(data: bytes) -> bool:
-    try:
-        backup_path = DB_PATH + '.bak'
-        if os.path.exists(DB_PATH):
-            os.rename(DB_PATH, backup_path)
-        with open(DB_PATH, 'wb') as f:
-            f.write(data)
-        global _db_initialized
-        _db_initialized = False
-        initialize_database()
-        return True
-    except Exception as e:
-        logger.error("Database restore failed: %s", e)
-        return False
-
+    return False
 
 def link_cases(primary_id: str, related_id: str, relation: str = 'related') -> bool:
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=DictCursor)
         cursor.execute(
-            "UPDATE legal_audit_logs SET related_cases = COALESCE(related_cases || ', ', '') || ? WHERE incident_id = ?",
+            "UPDATE legal_audit_logs SET related_cases = COALESCE(related_cases || ', ', '') || %s WHERE incident_id = %s",
             (f"{related_id}:{relation}", primary_id)
         )
         cursor.execute(
-            "UPDATE legal_audit_logs SET related_cases = COALESCE(related_cases || ', ', '') || ? WHERE incident_id = ?",
+            "UPDATE legal_audit_logs SET related_cases = COALESCE(related_cases || ', ', '') || %s WHERE incident_id = %s",
             (f"{primary_id}:{relation}", related_id)
         )
         return True
@@ -539,7 +599,7 @@ def link_cases(primary_id: str, related_id: str, relation: str = 'related') -> b
 def get_related_cases(incident_id: str) -> List[Dict[str, str]]:
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT related_cases FROM legal_audit_logs WHERE incident_id = ?", (incident_id,)
+            "SELECT related_cases FROM legal_audit_logs WHERE incident_id = %s", (incident_id,)
         ).fetchone()
         if not row or not row['related_cases']:
             return []
@@ -573,7 +633,7 @@ def rebuild_search_index() -> None:
     with get_db_connection() as conn:
         try:
             conn.execute("INSERT INTO report_search_index(report_search_index) VALUES('delete-all')")
-        except sqlite3.OperationalError:
+        except psycopg2.OperationalError:
             conn.execute("DELETE FROM report_search_index")
         rows = conn.execute(
             "SELECT id, incident_id, officer_name, document_type, COALESCE(final_approved_report, unedited_ai_draft, '') as text FROM legal_audit_logs"
@@ -581,10 +641,10 @@ def rebuild_search_index() -> None:
         for r in rows:
             try:
                 conn.execute(
-                    "INSERT INTO report_search_index (rowid, incident_id, officer_name, document_type, narrative_text) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO report_search_index (rowid, incident_id, officer_name, document_type, narrative_text) VALUES (%s, %s, %s, %s, %s)",
                     (r['id'], r['incident_id'], r['officer_name'], r['document_type'], r['text'])
                 )
-            except sqlite3.OperationalError:
+            except psycopg2.OperationalError:
                 pass
 
 
@@ -599,13 +659,13 @@ def search_reports(query: str, limit: int = 30, raw_query: bool = False) -> List
             rows = conn.execute(
                 """SELECT l.* FROM report_search_index f
                    JOIN legal_audit_logs l ON l.id = f.rowid
-                   WHERE report_search_index MATCH ?
+                   WHERE report_search_index @@ to_tsquery(%s)
                    ORDER BY rank
                    LIMIT ?""",
                 (fts5_query, limit),
             ).fetchall()
             return [dict(r) for r in rows]
-        except sqlite3.OperationalError:
+        except psycopg2.OperationalError:
             rebuild_search_index()
             return search_reports(query, limit)
 
@@ -621,13 +681,13 @@ def search_officer_reports(officer_name: str, query: str, limit: int = 20, raw_q
             rows = conn.execute(
                 """SELECT l.* FROM report_search_index f
                    JOIN legal_audit_logs l ON l.id = f.rowid
-                   WHERE report_search_index MATCH ? AND l.officer_name = ?
+                   WHERE report_search_index @@ to_tsquery(%s) AND l.officer_name = %s
                    ORDER BY rank
                    LIMIT ?""",
                 (fts5_query, officer_name, limit),
             ).fetchall()
             return [dict(r) for r in rows]
-        except sqlite3.OperationalError:
+        except psycopg2.OperationalError:
             rebuild_search_index()
             return search_officer_reports(officer_name, query, limit)
 
@@ -639,17 +699,17 @@ def save_evidence_file(incident_id: str, file_name: str, file_path: str, file_si
     with get_db_connection() as conn:
         cursor = conn.execute(
             """INSERT INTO evidence_files (incident_id, file_name, file_path, file_size, mime_type, uploaded_by, uploaded_at, description, category)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (incident_id, file_name, file_path, file_size, mime_type, uploaded_by,
              datetime.now().isoformat(), description, category)
         )
-        return cursor.lastrowid
+        return cursor.fetchone()[0]
 
 
 def get_evidence_files(incident_id: str) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM evidence_files WHERE incident_id = ? ORDER BY uploaded_at DESC",
+            "SELECT * FROM evidence_files WHERE incident_id = %s ORDER BY uploaded_at DESC",
             (incident_id,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -657,7 +717,7 @@ def get_evidence_files(incident_id: str) -> List[Dict[str, Any]]:
 
 def delete_evidence_file(file_id: int) -> bool:
     with get_db_connection() as conn:
-        row = conn.execute("SELECT file_path FROM evidence_files WHERE id = ?", (file_id,)).fetchone()
+        row = conn.execute("SELECT file_path FROM evidence_files WHERE id = %s", (file_id,)).fetchone()
         if row:
             path = row['file_path']
             if os.path.exists(path):
@@ -665,7 +725,7 @@ def delete_evidence_file(file_id: int) -> bool:
                     os.remove(path)
                 except OSError:
                     pass
-        conn.execute("DELETE FROM evidence_files WHERE id = ?", (file_id,))
+        conn.execute("DELETE FROM evidence_files WHERE id = %s", (file_id,))
         return True
 
 
@@ -688,7 +748,7 @@ def get_all_users() -> List[Dict[str, Any]]:
 def get_user(badge_id: str) -> Optional[Dict[str, Any]]:
     with get_db_connection() as conn:
         row = conn.execute(
-            "SELECT * FROM officer_users WHERE badge_id = ?", (badge_id,)
+            "SELECT * FROM officer_users WHERE badge_id = %s", (badge_id,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -696,15 +756,15 @@ def get_user(badge_id: str) -> Optional[Dict[str, Any]]:
 def upsert_user(badge_id: str, name: str, role: str, email: str = "", phone: str = "",
                 is_active: bool = True) -> bool:
     with get_db_connection() as conn:
-        existing = conn.execute("SELECT badge_id FROM officer_users WHERE badge_id = ?", (badge_id,)).fetchone()
+        existing = conn.execute("SELECT badge_id FROM officer_users WHERE badge_id = %s", (badge_id,)).fetchone()
         if existing:
             conn.execute(
-                "UPDATE officer_users SET name=?, role=?, email=?, phone=?, is_active=? WHERE badge_id=?",
+                "UPDATE officer_users SET name=%s, role=%s, email=%s, phone=%s, is_active=? WHERE badge_id=?",
                 (name, role, email, phone, 1 if is_active else 0, badge_id)
             )
         else:
             conn.execute(
-                "INSERT INTO officer_users (badge_id, name, role, email, phone, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO officer_users (badge_id, name, role, email, phone, is_active, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (badge_id, name, role, email, phone, 1 if is_active else 0, datetime.now().isoformat())
             )
         return True
@@ -712,13 +772,13 @@ def upsert_user(badge_id: str, name: str, role: str, email: str = "", phone: str
 
 def deactivate_user(badge_id: str) -> bool:
     with get_db_connection() as conn:
-        conn.execute("UPDATE officer_users SET is_active = 0 WHERE badge_id = ?", (badge_id,))
+        conn.execute("UPDATE officer_users SET is_active = 0 WHERE badge_id = %s", (badge_id,))
         return True
 
 
 def activate_user(badge_id: str) -> bool:
     with get_db_connection() as conn:
-        conn.execute("UPDATE officer_users SET is_active = 1 WHERE badge_id = ?", (badge_id,))
+        conn.execute("UPDATE officer_users SET is_active = 1 WHERE badge_id = %s", (badge_id,))
         return True
 
 
@@ -726,10 +786,10 @@ def record_user_login(badge_id: str, ip_address: str = "") -> None:
     with get_db_connection() as conn:
         now = datetime.now().isoformat()
         conn.execute(
-            "UPDATE officer_users SET last_login = ? WHERE badge_id = ?", (now, badge_id)
+            "UPDATE officer_users SET last_login = %s WHERE badge_id = %s", (now, badge_id)
         )
         conn.execute(
-            "INSERT INTO user_sessions (badge_id, login_at, last_activity, ip_address) VALUES (?, ?, ?, ?)",
+            "INSERT INTO user_sessions (badge_id, login_at, last_activity, ip_address) VALUES (%s, %s, %s, %s)",
             (badge_id, now, now, ip_address)
         )
 
@@ -737,7 +797,7 @@ def record_user_login(badge_id: str, ip_address: str = "") -> None:
 def get_user_sessions(badge_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     with get_db_connection() as conn:
         rows = conn.execute(
-            "SELECT * FROM user_sessions WHERE badge_id = ? ORDER BY login_at DESC LIMIT ?",
+            "SELECT * FROM user_sessions WHERE badge_id = %s ORDER BY login_at DESC LIMIT ?",
             (badge_id, limit)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -752,20 +812,96 @@ def purge_old_records(days: int = DATA_RETENTION_DAYS) -> int:
     to_delete: list = []
     with get_db_connection() as conn:
         cursor = conn.execute(
-            "SELECT id, incident_id FROM legal_audit_logs WHERE submission_timestamp < ?",
+            "SELECT id, incident_id FROM legal_audit_logs WHERE submission_timestamp < %s",
             (cutoff,)
         )
         to_delete = [dict(r) for r in cursor.fetchall()]
+        files_removed = 0
         for entry in to_delete:
+            file_rows = conn.execute(
+                "SELECT file_path FROM evidence_files WHERE incident_id = %s", (entry['incident_id'],)
+            ).fetchall()
+            for fr in file_rows:
+                fp = fr['file_path']
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                        files_removed += 1
+                    except OSError:
+                        pass
             conn.execute(
-                "DELETE FROM evidence_files WHERE incident_id = ?", (entry['incident_id'],)
+                "DELETE FROM evidence_files WHERE incident_id = %s", (entry['incident_id'],)
             )
             conn.execute(
-                "DELETE FROM legal_audit_logs WHERE id = ?", (entry['id'],)
+                "DELETE FROM legal_audit_logs WHERE id = %s", (entry['id'],)
             )
     if to_delete:
+        logger.info("Purged %d old records and %d evidence files from disk", len(to_delete), files_removed)
         rebuild_search_index()
     return len(to_delete)
+
+
+# --- Spell Check Custom Dictionary ---
+
+
+def add_custom_correction(misspelling: str, correction: str, added_by: str = '') -> bool:
+    with get_db_connection() as conn:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO spell_custom_dict (misspelling, correction, added_by, created_at) VALUES (%s, %s, %s, %s)",
+                (misspelling, correction, added_by, datetime.now().isoformat())
+            )
+            return conn.total_changes > 0
+        except psycopg2.IntegrityError:
+            return False
+
+
+def remove_custom_correction(misspelling: str) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE spell_custom_dict SET is_active = 0 WHERE misspelling = %s",
+            (misspelling,)
+        )
+        return cursor.rowcount > 0
+
+
+def get_custom_corrections() -> List[Dict[str, Any]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM spell_custom_dict WHERE is_active = 1 ORDER BY misspelling"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_custom_dict() -> Dict[str, str]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT misspelling, correction FROM spell_custom_dict WHERE is_active = 1"
+        ).fetchall()
+        return {r['misspelling']: r['correction'] for r in rows}
+
+
+# --- Theme Preference ---
+
+
+def set_theme_preference(badge_id: str, theme: str) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE officer_users SET theme_pref = %s WHERE badge_id = %s",
+            (theme, badge_id)
+        )
+        return cursor.rowcount > 0
+
+
+def get_theme_preference(badge_id: str) -> str:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT theme_pref FROM officer_users WHERE badge_id = %s",
+            (badge_id,)
+        ).fetchone()
+        if row:
+            return row['theme_pref']
+        return 'dark'
 
 
 def delete_reports(ids: List[int]) -> int:
@@ -788,11 +924,11 @@ def get_dashboard_analytics(days: int = 30) -> Dict[str, Any]:
     with get_db_connection() as conn:
         total = conn.execute("SELECT COUNT(*) as c FROM legal_audit_logs").fetchone()['c']
         recent = conn.execute(
-            "SELECT COUNT(*) as c FROM legal_audit_logs WHERE submission_timestamp >= ?",
+            "SELECT COUNT(*) as c FROM legal_audit_logs WHERE submission_timestamp >= %s",
             (cutoff,)
         ).fetchone()['c']
         officers = conn.execute(
-            "SELECT COUNT(DISTINCT officer_name) as c FROM legal_audit_logs WHERE submission_timestamp >= ?",
+            "SELECT COUNT(DISTINCT officer_name) as c FROM legal_audit_logs WHERE submission_timestamp >= %s",
             (cutoff,)
         ).fetchone()['c']
         active_users = conn.execute(
@@ -814,7 +950,7 @@ def get_login_audit_logs(limit: int = 100, badge_id: str = "") -> List[Dict[str,
     with get_db_connection() as conn:
         if badge_id:
             rows = conn.execute(
-                "SELECT * FROM login_audit_log WHERE badge_id = ? ORDER BY attempt_time DESC LIMIT ?",
+                "SELECT * FROM login_audit_log WHERE badge_id = %s ORDER BY attempt_time DESC LIMIT ?",
                 (badge_id, limit)
             ).fetchall()
         else:
@@ -850,7 +986,56 @@ def verify_audit_chain() -> List[Dict[str, Any]]:
     return results
 
 
+# --- Report Snapshots ---
+
+def save_snapshot_db(incident_id: str, text: str, label: str = "", officer: str = "") -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor(cursor_factory=DictCursor)
+        cursor.execute(
+            "SELECT id FROM report_snapshots WHERE incident_id = %s ORDER BY created_at DESC LIMIT 1",
+            (incident_id,)
+        )
+        prev_row = cursor.fetchone()
+        prev_id = prev_row["id"] if prev_row else None
+        cursor.execute(
+            "INSERT INTO report_snapshots (incident_id, snapshot_text, label, officer_name, created_at, previous_snapshot_id) VALUES (%s, %s, %s, %s, %s, %s)",
+            (incident_id, text, label, officer, datetime.now().isoformat(), prev_id)
+        )
+        return cursor.fetchone()[0]
+
+
+def get_snapshots(incident_id: str) -> List[Dict]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM report_snapshots WHERE incident_id = %s ORDER BY created_at ASC",
+            (incident_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_snapshot_by_id(snapshot_id: int) -> Optional[Dict]:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM report_snapshots WHERE id = %s", (snapshot_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 if __name__ == '__main__':
-    print("Database initialized at:", DB_PATH)
+    print("Database initialized at:", DB_URL)
     stats = get_statistics()
     print("Current statistics:", stats)
+
+def find_similar_reports_vector(embedding: List[float], limit: int = 5) -> List[Dict[str, Any]]:
+    if not embedding:
+        return []
+    with get_db_connection() as conn:
+        cursor = conn.cursor(cursor_factory=DictCursor)
+        cursor.execute('''
+            SELECT id, incident_id, snapshot_text, label, officer_name, created_at
+            FROM report_snapshots
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <-> %s::vector
+            LIMIT %s
+        ''', (embedding, limit))
+        return [dict(r) for r in cursor.fetchall()]

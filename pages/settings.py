@@ -19,8 +19,8 @@ def render():
             st.warning("Admin access required.")
             return
 
-        tab_db, tab_retention, tab_linking, tab_evidence = st.tabs(
-            ["Database", "Data Retention", "Case Linking", "Evidence Settings"]
+        tab_db, tab_retention, tab_linking, tab_evidence, tab_templates, tab_presets = st.tabs(
+            ["Database", "Data Retention", "Case Linking", "Evidence Settings", "Templates & Statutes", "Export Presets"]
         )
 
         with tab_db:
@@ -40,23 +40,41 @@ def render():
                 st.markdown("<div style='font-size:0.72rem;font-weight:600;margin-bottom:8px;'>Restore</div>", unsafe_allow_html=True)
                 st.warning("Replaces current database. Auto-backup created.")
                 uploaded = st.file_uploader("Upload .db file", type=['db'], key="restore_upload", label_visibility="collapsed")
-                if uploaded and st.button("Restore", type="primary", use_container_width=True):
-                    if restore_database(uploaded.read()):
-                        st.success("Restored. Re-run to apply.")
-                    else:
-                        st.error("Restore failed")
+                if uploaded and st.button("Restore", type="primary", use_container_width=True, key="restore_btn"):
+                    st.session_state['_confirm_action'] = 'restore_db'
+                if st.session_state.get('_confirm_action') == 'restore_db' and uploaded:
+                    confirm = st.text_input("Type CONFIRM to proceed with restore", key="confirm_restore")
+                    if st.button("Execute Restore", key="exec_restore"):
+                        if confirm == "CONFIRM":
+                            if restore_database(uploaded.read()):
+                                st.session_state.pop('_confirm_action', None)
+                                st.success("Restored. Re-run to apply.")
+                                st.rerun()
+                            else:
+                                st.error("Restore failed")
+                        else:
+                            st.warning("Type CONFIRM exactly")
 
         with tab_retention:
             st.markdown("<div class='card-header'>Data Retention & Auto-Purge</div>", unsafe_allow_html=True)
             st.markdown(f"<div style='font-size:0.65rem;opacity:0.5;margin-bottom:8px;'>Current setting: {DATA_RETENTION_DAYS} days (0 = disabled)</div>", unsafe_allow_html=True)
             if DATA_RETENTION_DAYS > 0:
                 st.info(f"Records older than {DATA_RETENTION_DAYS} days will be auto-purged on app startup.")
-            if st.button("Purge Old Records Now", type="primary", use_container_width=True):
-                purged = purge_old_records(DATA_RETENTION_DAYS)
-                if purged > 0:
-                    st.success(f"Purged {purged} old record(s)")
-                else:
-                    st.info("No records to purge")
+            if st.button("Purge Old Records Now", type="primary", use_container_width=True, key="purge_btn"):
+                st.session_state['_confirm_action'] = 'purge'
+            if st.session_state.get('_confirm_action') == 'purge':
+                confirm = st.text_input("Type DELETE to confirm purge", key="confirm_purge")
+                if st.button("Execute Purge", key="exec_purge"):
+                    if confirm == "DELETE":
+                        purged = purge_old_records(DATA_RETENTION_DAYS)
+                        st.session_state.pop('_confirm_action', None)
+                        if purged > 0:
+                            st.success(f"Purged {purged} old record(s)")
+                        else:
+                            st.info("No records to purge")
+                        st.rerun()
+                    else:
+                        st.warning("Type DELETE exactly")
             st.markdown("<div style='margin-top:12px;font-size:0.65rem;opacity:0.4;'>Set CHRONOS_DATA_RETENTION_DAYS in environment to change the retention period.</div>", unsafe_allow_html=True)
 
         with tab_linking:
@@ -87,6 +105,87 @@ def render():
                         ev_size += os.path.getsize(fp)
             st.markdown(f"<div style='font-size:0.62rem;color:#64748b;'>Evidence directory: {EVIDENCE_DIR}<br>Total storage: {ev_size / 1024 / 1024:.1f} MB</div>", unsafe_allow_html=True)
             st.markdown(f"<div style='margin-top:8px;font-size:0.65rem;opacity:0.4;'>Session timeout: {SESSION_TIMEOUT_SECONDS}s ({SESSION_TIMEOUT_SECONDS // 60} min)</div>", unsafe_allow_html=True)
+
+        with tab_templates:
+            st.markdown("<div class='card-header'>Report Template Manager</div>", unsafe_allow_html=True)
+            with st.expander("Report Template Manager", expanded=True):
+                from templates import get_all_templates, save_template, get_all_template_types
+                all_tpl = get_all_templates()
+                tpl_keys = list(all_tpl.keys())
+                selected_tpl = st.selectbox("Current Templates", tpl_keys, key="tpl_selector")
+                if selected_tpl and selected_tpl in all_tpl:
+                    tpl_data = all_tpl[selected_tpl]
+                    st.markdown(f"**Description:** {tpl_data.get('description', '')}")
+                    st.markdown("**Sections:**")
+                    for title, hint in tpl_data.get("sections", []):
+                        st.markdown(f"- **{title}** — {hint}")
+                st.markdown("<hr style='margin:12px 0;border-color:#1e293b;'>", unsafe_allow_html=True)
+                st.markdown("**New Template**")
+                new_key = st.text_input("Key Name", key="new_tpl_key", placeholder="e.g. Traffic Crash Report")
+                new_desc = st.text_input("Description", key="new_tpl_desc", placeholder="Description of the template")
+                new_sections = st.text_area("Sections (one per line, `Title|Hint` format)", key="new_tpl_sections", height=120, placeholder="Incident Overview|Date/time, location, reporting officer\nResponse|Dispatch and arrival times")
+                if st.button("Save Template", key="save_tpl_btn", use_container_width=True):
+                    if save_template(new_key, new_desc, new_sections):
+                        st.success(f"Template '{new_key}' saved")
+                        st.rerun()
+                    else:
+                        st.warning("Key, description, and sections required")
+
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            st.markdown("<div class='card-header'>Statute Database Management</div>", unsafe_allow_html=True)
+            with st.expander("Statute Database Management", expanded=True):
+                from wi_statutes import WI_CRIMINAL_STATUTES, export_statutes_to_json, import_statutes_from_json
+                import tempfile, json, os
+                st.markdown(f"Current statute count: **{len(WI_CRIMINAL_STATUTES)}**")
+                if st.button("Export Statutes to JSON", use_container_width=True, key="export_statutes_btn"):
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json', mode='w', encoding='utf-8')
+                    export_statutes_to_json(tmp.name)
+                    with open(tmp.name, 'rb') as f:
+                        st.download_button("Download Statutes JSON", data=f, file_name="wi_statutes_export.json", mime="application/json", use_container_width=True, key="dl_statutes")
+                    os.unlink(tmp.name)
+                uploaded_statutes = st.file_uploader("Import Statutes from JSON", type=['json'], key="statutes_import", label_visibility="collapsed")
+                if uploaded_statutes is not None:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json', mode='wb')
+                    tmp.write(uploaded_statutes.read())
+                    tmp.close()
+                    imported, total = import_statutes_from_json(tmp.name)
+                    os.unlink(tmp.name)
+                    st.success(f"Imported {imported} statutes. Total: {total}")
+                    st.rerun()
+
+        with tab_presets:
+            st.markdown("<div class='card-header'>Export Presets</div>", unsafe_allow_html=True)
+            import json
+            PRESETS_FILE = os.path.join(os.path.dirname(__file__), "..", "export_presets.json")
+            if os.path.exists(PRESETS_FILE):
+                with open(PRESETS_FILE, 'r') as f:
+                    presets = json.load(f)
+            else:
+                presets = {}
+                
+            st.markdown("Current Presets:")
+            for k, v in presets.items():
+                st.markdown(f"- **{h(k)}**: {v.get('format', 'DOCX')} - Auto-NIBRS: {v.get('auto_nibrs', False)}")
+                
+            st.markdown("---")
+            st.markdown("**New Preset**")
+            new_preset_name = st.text_input("Preset Name", placeholder="e.g. Supervisor Review Mode")
+            new_preset_format = st.selectbox("Export Format", ["DOCX", "PDF", "TXT", "HTML", "OFFLINE"])
+            new_preset_nibrs = st.checkbox("Auto-generate NIBRS XML?")
+            
+            if st.button("Save Preset", use_container_width=True):
+                if new_preset_name:
+                    presets[new_preset_name] = {
+                        "format": new_preset_format,
+                        "auto_nibrs": new_preset_nibrs
+                    }
+                    with open(PRESETS_FILE, 'w') as f:
+                        json.dump(presets, f, indent=2)
+                    st.success(f"Preset {new_preset_name} saved.")
+                    st.rerun()
+                else:
+                    st.error("Name is required.")
+
     except Exception as e:
         logger.exception("Settings error: %s", e)
         st.error(f"Error: {e}")

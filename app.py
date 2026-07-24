@@ -295,6 +295,7 @@ def _inject_keyboard_shortcuts() -> None:
 
 def main() -> None:
     inject_css()
+    st.warning("⚠️ **DEPRECATION WARNING**: This Streamlit interface is being deprecated in favor of the new React/Next.js interface.", icon="⚠️")
     _inject_keyboard_shortcuts()
     init_session_state()
     if not login_gate():

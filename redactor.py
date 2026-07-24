@@ -143,7 +143,20 @@ REDACTION_CATEGORIES = {
 }
 
 
-def sanitize_pii_content(raw_text: str, categories: Optional[Set[str]] = None) -> str:
+_LOCATION_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"\b\d{2,3}°\s*\d{2}'\s*\d{2}(?:\.\d+)?\"?\s*[NS]\s*,?\s*\d{2,3}°\s*\d{2}'\s*\d{2}(?:\.\d+)?\"?\s*[EW]\b"), '[GPS COORDINATES]'),
+    (re.compile(r"\b(?:Intersection of|At|between|and)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Rd|Road|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Ct|Court|Cir(?:cle)?|Way|Pkwy|Parkway)\s+(?:and|&|/)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:St(?:reet)?|Ave(?:nue)?|Rd|Road|Blvd|Boulevard|Dr(?:ive)?)"), '[INTERSECTION]'),
+    (re.compile(r"\b(?:near|behind|next to|across from|adjacent to)\s+(?:the\s+)?[A-Z][A-Za-z\s']+(?:School|Church|Hospital|Park|Mall|Plaza|Center|Station|Library|Store|Market|Bank|Hotel|Gas Station|Stadium|Arena)"), '[LANDMARK]'),
+]
+
+
+def sanitize_location(text: str) -> str:
+    for pattern, replacement in _LOCATION_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def sanitize_pii_content(raw_text: str, categories: Optional[Set[str]] = None, custom_terms: Optional[List[str]] = None) -> str:
     text = raw_text
     active = categories if categories else set(REDACTION_CATEGORIES.keys())
 
@@ -154,7 +167,45 @@ def sanitize_pii_content(raw_text: str, categories: Optional[Set[str]] = None) -
         for pattern in cat_info["patterns"]:
             text = re.sub(pattern, cat_info["replace"], text, flags=flags)
 
+    text = sanitize_location(text)
+
+    if custom_terms:
+        for term in custom_terms:
+            term = term.strip()
+            if term:
+                escaped = re.escape(term)
+                text = re.sub(fr"(?i)\b{escaped}\b", "[REDACTED_CUSTOM]", text)
+
     return text
+
+def extract_entities(raw_text: str) -> dict:
+    results = {}
+    for cat_id, cat_info in REDACTION_CATEGORIES.items():
+        flags = cat_info.get("flags", 0)
+        found = set()
+        for pattern in cat_info["patterns"]:
+            for match in re.finditer(pattern, raw_text, flags=flags):
+                if match.groups():
+                    found.add(match.group(1).strip())
+                else:
+                    found.add(match.group(0).strip())
+        if found:
+            results[cat_id] = {
+                "label": cat_info["label"],
+                "matches": list(found)
+            }
+            
+    loc_found = set()
+    for pattern, _ in _LOCATION_PATTERNS:
+        for match in re.finditer(pattern, raw_text):
+            loc_found.add(match.group(0).strip())
+    if loc_found:
+        results["location"] = {
+            "label": "Locations & Coordinates",
+            "matches": list(loc_found)
+        }
+        
+    return results
 
 
 def get_redaction_report(original: str, redacted: str) -> List[Tuple[str, str]]:

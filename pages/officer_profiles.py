@@ -1,5 +1,7 @@
 import streamlit as st
+import json
 import os
+import tempfile
 from pathlib import Path
 
 from profiler import (
@@ -9,6 +11,7 @@ from profiler import (
 from config import TEMP_DIR
 from ui import render_department_header, _load_custom_categories, _save_custom_category
 from logger import get_logger
+from phrase_book import export_phrases_to_json, import_phrases_from_json, get_phrases
 
 logger = get_logger(__name__)
 
@@ -88,6 +91,32 @@ def render():
             else:
                 st.markdown("""<div class="empty-state"><div class="icon">&#128100;</div>
                 <div class="title">No Profiles Yet</div><div class="desc">Upload samples to build officer writing profiles</div></div>""", unsafe_allow_html=True)
+        st.markdown("<div class='card-header' style='margin-top:24px;'>Phrase Book Import / Export</div>", unsafe_allow_html=True)
+        officer = st.text_input("Officer Name", key="pb_import_officer", placeholder="e.g. Det. Johnson")
+        if officer:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                with st.expander("Import Phrases"):
+                    uploaded = st.file_uploader("Upload JSON", type=["json"], key="pb_import", label_visibility="collapsed")
+                    if uploaded and st.button("Import", key="pb_import_btn", use_container_width=True):
+                        temp_path = os.path.join(TEMP_DIR, f"_pb_import_{os.urandom(4).hex()}.json")
+                        with open(temp_path, "wb") as f:
+                            f.write(uploaded.getvalue())
+                        count = import_phrases_from_json(officer, temp_path)
+                        os.remove(temp_path)
+                        st.success(f"Imported {count} phrases")
+                        st.rerun()
+            with col_b:
+                phrases = get_phrases(officer)
+                if phrases:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json", dir=TEMP_DIR)
+                    export_phrases_to_json(officer, tmp.name)
+                    with open(tmp.name, "rb") as f:
+                        blob = f.read()
+                    os.unlink(tmp.name)
+                    st.download_button("Export All Phrases", data=blob, file_name=f"phrases_{officer}.json", mime="application/json", key="pb_export_btn", use_container_width=True)
+                else:
+                    st.info("No phrases to export")
     except Exception as e:
         logger.exception("Error in officer profiles: %s", e)
         st.error(f"An error occurred: {e}")

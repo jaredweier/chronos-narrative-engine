@@ -286,29 +286,37 @@ def get_pipeline() -> PipelineManager:
     return pipeline_instance
 
 
-def submit_pdf_and_transcribe(pdf_path: str, video_path: str, initial_prompt: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
-    from pdf_parser import parse_zuercher_pdf
-    from transcriber import transcribe_bodycam
+
+def submit_pdf_and_transcribe(pdf_path: str, video_path: str, initial_prompt: Optional[str] = None) -> dict:
+    from tasks import parse_pdf_task, transcribe_video_task
     from config import WHISPER_INITIAL_PROMPT
-
-    pipeline = get_pipeline()
-    pdf_job_id = pipeline.submit_job(parse_zuercher_pdf, pdf_path)
+    
     prompt = initial_prompt or WHISPER_INITIAL_PROMPT
-    video_job_id = pipeline.submit_job(transcribe_bodycam, video_path, initial_prompt=prompt)
+    
+    tasks = {}
+    if pdf_path:
+        tasks['pdf'] = parse_pdf_task.delay(pdf_path).id
+    if video_path:
+        tasks['video'] = transcribe_video_task.delay(video_path, prompt).id
+        
+    return tasks
 
-    try:
-        cad_data = pipeline.wait_for_job(pdf_job_id, timeout=120)
-    except PipelineError:
-        logger.exception("PDF parsing job failed")
-        cad_data = None
 
-    try:
-        transcript = pipeline.wait_for_job(video_job_id, timeout=300)
-    except PipelineError:
-        logger.exception("Transcription job failed")
-        transcript = None
 
-    return cad_data, transcript
+def submit_all(jobs: List[Dict]) -> Dict[str, Any]:
+    pipeline = get_pipeline()
+    submitted = {}
+    for job in jobs:
+        jid = pipeline.submit_job(job["func"], *job.get("args", ()), **job.get("kwargs", {}))
+        submitted[job.get("id", jid)] = jid
+    results = {}
+    for name, jid in submitted.items():
+        try:
+            job_def = next((j for j in jobs if j.get("id", jid) == name), {})
+            results[name] = pipeline.wait_for_job(jid, timeout=job_def.get("timeout", 300))
+        except PipelineError:
+            results[name] = None
+    return results
 
 
 def cleanup_pipeline() -> None:

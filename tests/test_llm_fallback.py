@@ -13,16 +13,22 @@ from providers.llm_fallback import FallbackLLMProvider, _generate_template_narra
 class _OkProvider(LLMProvider):
     def complete(self, prompt="", temperature=0.7, max_tokens=2048, stream=False, chunk_callback=None, timeout=120):
         return LLMResponse(text="This is a valid AI-generated narrative.", model="test_model", duration_ms=50)
+    def stream_complete(self, *args, **kwargs):
+        yield "ok"
 
 
 class _ErrorProvider(LLMProvider):
     def complete(self, prompt="", temperature=0.7, max_tokens=2048, stream=False, chunk_callback=None, timeout=120):
         return LLMResponse(text="[ERROR] Cannot connect to Ollama.", model="test_model", duration_ms=50)
+    def stream_complete(self, *args, **kwargs):
+        yield "ok"
 
 
 class _RaisingProvider(LLMProvider):
     def complete(self, prompt="", temperature=0.7, max_tokens=2048, stream=False, chunk_callback=None, timeout=120):
         raise ConnectionError("Connection refused")
+    def stream_complete(self, *args, **kwargs):
+        yield "ok"
 
 
 class TestFallbackPassthrough:

@@ -3,11 +3,13 @@ import logging.handlers
 import json
 import sys
 import os
+import time
 import traceback
 from datetime import datetime
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+logger = logging.getLogger(__name__)
 
 _human_log_file = os.path.join(LOG_DIR, "chronos.log")
 _json_log_file = os.path.join(LOG_DIR, "chronos.jsonl")
@@ -70,3 +72,44 @@ class ChronosLoggerAdapter(logging.LoggerAdapter):
 
 def get_chronos_logger(name: str) -> ChronosLoggerAdapter:
     return ChronosLoggerAdapter(get_logger(name), extra=None)
+
+
+def archive_logs() -> int:
+    import shutil
+    from config import LOG_ARCHIVE_ENABLED, LOG_ARCHIVE_DIR, LOG_ARCHIVE_RETENTION_DAYS
+    if not LOG_ARCHIVE_ENABLED:
+        return 0
+    os.makedirs(LOG_ARCHIVE_DIR, exist_ok=True)
+    archived = 0
+    now = time.time()
+    for fname in os.listdir(LOG_DIR):
+        fpath = os.path.join(LOG_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        fage_days = (now - os.path.getmtime(fpath)) / 86400
+        if fage_days > 1:
+            ts = datetime.fromtimestamp(os.path.getmtime(fpath)).strftime('%Y%m%d')
+            arc_name = f"{ts}_{fname}"
+            shutil.move(fpath, os.path.join(LOG_ARCHIVE_DIR, arc_name))
+            archived += 1
+    for fname in os.listdir(LOG_ARCHIVE_DIR):
+        fpath = os.path.join(LOG_ARCHIVE_DIR, fname)
+        if os.path.isfile(fpath):
+            fage_days = (now - os.path.getmtime(fpath)) / 86400
+            if fage_days > LOG_ARCHIVE_RETENTION_DAYS:
+                os.remove(fpath)
+    if archived:
+        logger.info("Archived %d old log files", archived)
+    return archived
+
+
+def download_logs_zip() -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(LOG_DIR):
+            fpath = os.path.join(LOG_DIR, fname)
+            if os.path.isfile(fpath):
+                zf.write(fpath, arcname=fname)
+    return buf.getvalue()

@@ -1,6 +1,29 @@
 version: "3.8"
 
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: chronos_user
+      POSTGRES_PASSWORD: chronos_password
+      POSTGRES_DB: chronos_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chronos_user -d chronos_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
   ollama:
     image: ollama/ollama:latest
     ports:
@@ -16,18 +39,39 @@ services:
               capabilities: [gpu]
     runtime: nvidia
 
-  chronos:
+  celery_worker_default:
     build: .
-    ports:
-      - "8501:8501"
+    command: wait-for-it postgres:5432 -- celery -A celery_app worker -Q celery --loglevel=info
     environment:
       - CHRONOS_OLLAMA_URL=http://ollama:11434
-      - CHRONOS_DB_FILENAME=/data/department_reports.db
-      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4096
+      - CHRONOS_DB_URL=postgresql://chronos_user:chronos_password@postgres:5432/chronos_db
+      - CHRONOS_REDIS_URL=redis://redis:6379/0
+      - CHRONOS_AUTH_MODE=local
     volumes:
       - chronos_data:/data
     depends_on:
-      - ollama
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery_worker_audio:
+    build: .
+    command: wait-for-it postgres:5432 -- celery -A celery_app worker -Q audio --loglevel=info -c 1
+    environment:
+      - CHRONOS_OLLAMA_URL=http://ollama:11434
+      - CHRONOS_DB_URL=postgresql://chronos_user:chronos_password@postgres:5432/chronos_db
+      - CHRONOS_REDIS_URL=redis://redis:6379/0
+      - CHRONOS_AUTH_MODE=local
+    volumes:
+      - chronos_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     deploy:
       resources:
         reservations:
@@ -36,6 +80,54 @@ services:
               count: 1
               capabilities: [gpu]
 
+  celery_worker_vision:
+    build: .
+    command: wait-for-it postgres:5432 -- celery -A celery_app worker -Q vision --loglevel=info -c 1
+    environment:
+      - CHRONOS_OLLAMA_URL=http://ollama:11434
+      - CHRONOS_DB_URL=postgresql://chronos_user:chronos_password@postgres:5432/chronos_db
+      - CHRONOS_REDIS_URL=redis://redis:6379/0
+      - CHRONOS_AUTH_MODE=local
+    volumes:
+      - chronos_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  chronos:
+    build: .
+    command: wait-for-it postgres:5432 -- streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - CHRONOS_OLLAMA_URL=http://ollama:11434
+      - CHRONOS_DB_URL=postgresql://chronos_user:chronos_password@postgres:5432/chronos_db
+      - CHRONOS_REDIS_URL=redis://redis:6379/0
+      - CHRONOS_AUTH_MODE=local
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=4096
+    volumes:
+      - chronos_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+
 volumes:
   ollama_data:
   chronos_data:
+  pgdata:
+  redisdata:

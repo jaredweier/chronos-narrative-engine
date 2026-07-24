@@ -17,6 +17,7 @@ from config import (
     WHISPER_DEEPFILTER_ATTEN_LIM_DB,
     WHISPER_WORD_TIMESTAMPS, WHISPER_TRANSCRIPT_CORRECTOR_ENABLED,
     WHISPER_TWO_PASS_ENABLED, WHISPER_TWO_PASS_QUICK_MODEL,
+    WHISPER_LANGUAGE,
     TEMP_DIR,
 )
 from logger import get_logger
@@ -123,7 +124,11 @@ class AudioPreprocessor:
     @staticmethod
     def reduce_noise(y: np.ndarray, sr: int, strength: float = 0.75) -> np.ndarray:
         if WHISPER_NOISE_REDUCE_METHOD == "deepfilter":
-            return AudioPreprocessor.reduce_noise_deepfilter(y, sr)
+            y_df = AudioPreprocessor.reduce_noise_deepfilter(y, sr)
+            if y_df is not None:
+                return y_df
+            logger.info("Falling back to noisereduce")
+            
         try:
             import noisereduce as nr
             y_denoised = nr.reduce_noise(
@@ -155,7 +160,7 @@ class AudioPreprocessor:
     def reduce_noise_deepfilter(y: np.ndarray, sr: int) -> np.ndarray:
         model = AudioPreprocessor._get_deepfilter_model()
         if model is None:
-            return y
+            return None
         try:
             atten_lim = None
             if WHISPER_DEEPFILTER_ATTEN_LIM_DB >= 0:
@@ -169,6 +174,19 @@ class AudioPreprocessor:
             return enhanced
         except Exception as e:
             logger.warning("DeepFilterNet3 processing failed: %s", e)
+            return None
+
+    @staticmethod
+    def apply_highpass_filter(y: np.ndarray, sr: int, cutoff_freq: float = 80.0) -> np.ndarray:
+        # Filter out low-frequency rumble (wind noise)
+        try:
+            from scipy.signal import butter, filtfilt
+            nyq = 0.5 * sr
+            normal_cutoff = cutoff_freq / nyq
+            b, a = butter(4, normal_cutoff, btype='high', analog=False)
+            y_filtered = filtfilt(b, a, y)
+            return y_filtered
+        except ImportError:
             return y
 
     @staticmethod
@@ -198,6 +216,7 @@ class AudioPreprocessor:
         y, sr = librosa.load(audio_path, sr=16000, mono=True)
         y = self.trim_silence(y, sr)
         y = self.normalize_loudness(y, sr)
+        y = self.apply_highpass_filter(y, sr)
         should_reduce = (
             WHISPER_NOISE_REDUCE_METHOD == "deepfilter"
             or self.needs_noise_reduction(y, sr)
@@ -388,6 +407,7 @@ class BodyCamTranscriber:
         use_batched: bool = True,
         enable_alignment: bool = True,
         enable_diarization: bool = True,
+        language: str = WHISPER_LANGUAGE,
     ):
         self.model_size = model_size
         self.device = device
@@ -398,6 +418,7 @@ class BodyCamTranscriber:
         self.use_batched = use_batched
         self.enable_alignment = enable_alignment
         self.enable_diarization = enable_diarization
+        self.language = language
         self.model = None
         self._batched_pipeline = None
         self._model_lock = threading.Lock()
@@ -594,7 +615,7 @@ class BodyCamTranscriber:
     def transcribe_file(
         self,
         file_path: str,
-        language: str = "en",
+        language: str = WHISPER_LANGUAGE,
         vad_filter: bool = True,
         initial_prompt: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -622,9 +643,9 @@ class BodyCamTranscriber:
             use_batched = (
                 self.use_batched
                 and self._batched_pipeline is not None
-                and not vad_filter
             )
 
+            audio_y = None
             if use_batched:
                 import librosa
                 import soundfile as sf
@@ -646,8 +667,9 @@ class BodyCamTranscriber:
 
             if self.enable_alignment and _has_transformers():
                 try:
-                    import librosa
-                    audio_y, audio_sr = librosa.load(processed_path, sr=16000, mono=True)
+                    if audio_y is None:
+                        import librosa
+                        audio_y, audio_sr = librosa.load(processed_path, sr=16000, mono=True)
                     segments = _align_words_with_wav2vec2(audio_y, segments)
                 except Exception as e:
                     logger.warning("Alignment skipped: %s", e)
@@ -744,7 +766,7 @@ class BodyCamTranscriber:
     def transcribe_to_text(
         self,
         file_path: str,
-        language: str = "en",
+        language: str = WHISPER_LANGUAGE,
         vad_filter: bool = True,
         initial_prompt: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -761,18 +783,18 @@ transcriber_instance = None
 _transcriber_lock = threading.Lock()
 
 
-def get_transcriber(**kwargs) -> BodyCamTranscriber:
+def get_transcriber(language: str = WHISPER_LANGUAGE, **kwargs) -> BodyCamTranscriber:
     global transcriber_instance
     if transcriber_instance is None:
         with _transcriber_lock:
             if transcriber_instance is None:
-                transcriber_instance = BodyCamTranscriber(**kwargs)
+                transcriber_instance = BodyCamTranscriber(language=language, **kwargs)
     return transcriber_instance
 
 
 def transcribe_bodycam(
     file_path: str,
-    language: str = "en",
+    language: str = WHISPER_LANGUAGE,
     vad_filter: bool = True,
     initial_prompt: Optional[str] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
